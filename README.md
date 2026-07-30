@@ -26,6 +26,27 @@ During `auth`, finish the BMW login in the browser completely before touching
 the terminal — interrupting the flow wedges the device code and it has to be
 restarted.
 
+## Running as a service
+
+```
+./launchd/install.sh
+```
+
+Installs two user LaunchAgents (idempotent — re-run after editing a plist):
+
+- `nl.koczan.bmw-cardata.stream` — `RunAtLoad` + `KeepAlive`, so it starts at
+  login and restarts on any exit. `ThrottleInterval` 30s stops a crash-loop
+  hammering BMW when the refresh token has expired and needs `bmwcd auth` by hand.
+- `nl.koczan.bmw-cardata.prune` — daily at 04:00.
+
+Logs land in `data/logs/`. Check state with `launchctl list | grep bmw-cardata`.
+
+**This does not survive sleep.** A LaunchAgent runs while you are logged in; it
+does not keep the Mac awake. A closed lid means no data, and because the feed is
+forward-only that gap can never be backfilled. For genuinely continuous capture
+the service belongs on an always-on host — at which point remember BMW allows
+only one stream connection per GCID, so it moves rather than being duplicated.
+
 ## Storage
 
 PostgreSQL (`brew install postgresql@17`), plain — no Timescale. At a parked
