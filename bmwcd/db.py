@@ -17,6 +17,10 @@ def init(cfg: Config) -> None:
         conn.execute((ROOT / "schema.sql").read_text())
 
 
+# ASN_isUnknown is deliberately absent: it stays text-only.
+ASN = {"asn_istrue": True, "asn_isfalse": False}
+
+
 def _row(payload: dict):
     """Flatten one message into a telemetry row, or None if unusable.
 
@@ -41,6 +45,14 @@ def _row(payload: dict):
             num = float(value)
         elif value is not None:
             txt = str(value)
+            # Several keys BMW documents as boolean actually arrive as the ASN
+            # enum -- ASN_isTrue / ASN_isFalse / ASN_isUnknown. Normalise the
+            # two decidable cases so `bool` is queryable, but keep the raw text
+            # as well: "unknown" is a real third state and mapping it to false
+            # would invent a fact the car never reported.
+            asn = ASN.get(txt.strip().lower())
+            if asn is not None:
+                bool_ = asn
         yield (
             entry.get("timestamp") or msg_ts,
             msg_ts,

@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMW CarData — track</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --muted: #99a1b3;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f5f6f8; --panel: #fff; --line: #dfe3ea; --text: #12151b; --muted: #5b6474; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  #map { position: absolute; inset: 0 0 132px 0; background: var(--bg); }
+  .leaflet-container { background: var(--bg); }
+
+  #bar { position: absolute; left: 0; right: 0; bottom: 0; height: 132px;
+    background: var(--panel); border-top: 1px solid var(--line);
+    padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #clock { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 190px; }
+  input[type=range] { flex: 1; min-width: 220px; accent-color: #3b82f6; }
+  button { background: var(--line); color: var(--text); border: 0; border-radius: 6px;
+    padding: 6px 12px; cursor: pointer; font-size: 13px; }
+  button:hover { filter: brightness(1.25); }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+  .sw { display: inline-block; width: 22px; height: 8px; border-radius: 2px;
+    vertical-align: middle; margin-right: 5px; }
+  .note { color: var(--muted); font-size: 12px; }
+  .veh { display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 12px; }
+  .pill { background: var(--line); border-radius: 999px; padding: 2px 9px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="bar">
+  <div class="row">
+    <button id="play">▶︎ Play</button>
+    <span id="clock">—</span>
+    <input type="range" id="slider" min="0" max="0" value="0" step="1">
+    <button id="end">Latest</button>
+  </div>
+  <div class="row legend">
+    <span><i class="sw" style="background:linear-gradient(90deg,#bfdbfe,#1d4ed8)"></i>electric (darker = higher kWh/100km)</span>
+    <span><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol (darker = higher use)</span>
+    <span><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
+    <span><i class="sw" style="background:#6b7280"></i>unknown</span>
+  </div>
+  <div class="row" id="vehicles"></div>
+  <div class="note" id="notes"></div>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+
+const RAMPS = {
+  electric: ['#bfdbfe', '#1d4ed8'],
+  petrol:   ['#fecaca', '#b91c1c'],
+  regen:    ['#bbf7d0', '#15803d'],
+  unknown:  ['#6b7280', '#6b7280'],
+  idle:     ['#6b7280', '#6b7280'],
+  start:    ['#6b7280', '#6b7280'],
+};
+const mix = (a, b, t) => {
+  const p = h => [1,3,5].map(i => parseInt(h.slice(i, i+2), 16));
+  const [ar,ag,ab] = p(a), [br,bg,bb] = p(b);
+  const c = (x,y) => Math.round(x + (y-x) * t).toString(16).padStart(2,'0');
+  return `#${c(ar,br)}${c(ag,bg)}${c(ab,bb)}`;
+};
+const colourFor = pt => {
+  const [lo, hi] = RAMPS[pt.mode] || RAMPS.unknown;
+  return mix(lo, hi, Math.max(0, Math.min(1, pt.intensity ?? 0)));
+};
+
+const map = L.map('map', { zoomControl: true });
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+  attribution: '&copy; OpenStreetMap, &copy; CARTO', maxZoom: 20,
+}).addTo(map);
+
+const vehicles = (DATA?.vehicles || []).filter(v => v.points.length);
+const allTimes = vehicles.flatMap(v => v.points.map(p => p.t)).sort((a,b) => a-b);
+
+const layers = vehicles.map(v => {
+  const segs = L.layerGroup().addTo(map);
+  for (let i = 1; i < v.points.length; i++) {
+    const a = v.points[i-1], b = v.points[i];
+    const line = L.polyline([[a.lat, a.lon], [b.lat, b.lon]], {
+      color: colourFor(b), weight: 5, opacity: 0.9, lineCap: 'round',
+    });
+    line.bindTooltip(
+      `${new Date(b.t).toLocaleString()}<br>${b.mode}` +
+      (b.kwh_per_100km != null ? `<br>${b.kwh_per_100km} kWh/100km` : '') +
+      (b.fuel_pct_per_100km != null ? `<br>${b.fuel_pct_per_100km} % fuel/100km` : '') +
+      (b.km ? `<br>${b.km.toFixed(2)} km` : '')
+    );
+    segs.addLayer(line);
+    b._line = line;
+  }
+  const marker = L.marker([v.points[0].lat, v.points[0].lon], { title: v.vin })
+    .addTo(map).bindPopup(v.vin);
+  return { v, segs, marker };
+});
+
+if (vehicles.length) {
+  const pts = vehicles.flatMap(v => v.points.map(p => [p.lat, p.lon]));
+  map.fitBounds(L.latLngBounds(pts).pad(0.25));
+  if (pts.length === 1 || map.getZoom() > 16) map.setZoom(15);
+} else {
+  map.setView([52.1, 5.1], 8);
+}
+
+const slider = document.getElementById('slider');
+const clock  = document.getElementById('clock');
+slider.max = Math.max(0, allTimes.length - 1);
+slider.value = slider.max;
+
+function lastAtOrBefore(points, t) {
+  let found = null;
+  for (const p of points) { if (p.t <= t) found = p; else break; }
+  return found;
+}
+
+function apply(idx) {
+  const t = allTimes[idx] ?? allTimes[allTimes.length - 1];
+  clock.textContent = t ? new Date(t).toLocaleString() : '—';
+  for (const { v, marker } of layers) {
+    const p = lastAtOrBefore(v.points, t);
+    if (p) { marker.setLatLng([p.lat, p.lon]); marker.setOpacity(1); }
+    else marker.setOpacity(0.25);
+    // Dim the future so the slider reads as "where was it then", not just a filter.
+    for (let i = 1; i < v.points.length; i++) {
+      const seg = v.points[i]._line;
+      if (seg) seg.setStyle({ opacity: v.points[i].t <= t ? 0.9 : 0.12 });
+    }
+  }
+}
+
+slider.addEventListener('input', () => apply(+slider.value));
+document.getElementById('end').addEventListener('click', () => {
+  slider.value = slider.max; apply(+slider.max);
+});
+
+let timer = null;
+const play = document.getElementById('play');
+play.addEventListener('click', () => {
+  if (timer) { clearInterval(timer); timer = null; play.textContent = '▶︎ Play'; return; }
+  play.textContent = '❚❚ Pause';
+  timer = setInterval(() => {
+    let next = +slider.value + 1;
+    if (next > +slider.max) { next = 0; }
+    slider.value = next; apply(next);
+  }, 220);
+});
+
+document.getElementById('vehicles').innerHTML = vehicles.map(v =>
+  `<span class="veh"><span class="pill">${v.vin}</span> ${v.points.length} fixes` +
+  (v.battery_kwh ? ` · ${v.battery_kwh} kWh` : '') + `</span>`).join('');
+
+const notes = (DATA?.notes || []).slice();
+if (!vehicles.length) notes.unshift('No location fixes recorded yet.');
+notes.push(`generated ${DATA?.generated ?? '—'}`);
+document.getElementById('notes').textContent = notes.join('  ·  ');
+
+apply(+slider.value);
+</script>
+</body>
+</html>
