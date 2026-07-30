@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import queue
+import signal
 import ssl
 import threading
 import time
@@ -155,10 +156,26 @@ class DbSink:
             finally:
                 self.queue.task_done()
 
-    def close(self) -> None:
+    def close(self, drain_seconds: float = 10.0) -> None:
+        """Drain what is queued before stopping, then report anything left.
+
+        Setting the stop flag first made the worker abandon the queue instantly
+        and silently -- measured at 1999 of 2000 rows discarded with `dropped`
+        still reading 0. The raw JSONL still holds them, but nothing surfaced
+        the gap, so it stayed invisible until someone noticed missing rows.
+        """
+        deadline = time.monotonic() + drain_seconds
+        while not self.queue.empty() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        left = self.queue.qsize()
         self._stop.set()
         self._worker.join(timeout=5)
-        if self.conn is not None and not self.conn.closed:
+        if left:
+            print(f"[db] {left} message(s) still queued at shutdown; "
+                  f"raw JSONL is intact — repair with: bmwcd load")
+        # Connection ownership stays with the worker; only close it here if the
+        # worker is genuinely gone, otherwise we yank it mid-insert.
+        if not self._worker.is_alive() and self.conn is not None and not self.conn.closed:
             self.conn.close()
 
 
@@ -180,6 +197,53 @@ def _backoff(failures: int) -> float:
     if failures >= EXTENDED_AFTER:
         return EXTENDED_BACKOFF
     return min(BASE_BACKOFF * (2 ** max(0, failures - 1)), MAX_BACKOFF)
+
+
+STATUS_FILE = "stream.status"
+
+
+def _status(cfg: Config, state: str, detail: str = "") -> None:
+    """Heartbeat for the menu bar indicator.
+
+    A live PID proves only that Python is running. The failure modes that
+    actually happen -- backoff after repeated refusals, an auth retry loop, DNS
+    failure -- all leave the process alive and the stream down, and without this
+    the indicator would show "streaming" throughout, then fade to "quiet" after
+    six hours, which is exactly how a parked car looks. Then a broken stream and
+    a parked car are indistinguishable, and that is the one distinction the
+    indicator exists to make.
+    """
+    try:
+        payload = {"state": state, "detail": detail, "at": time.time()}
+        path = cfg.data_dir / STATUS_FILE
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload))
+        os.replace(tmp, path)
+    except OSError:
+        pass  # never let status reporting break capture
+
+
+def _wait_for_new_tokens(limit: float = 3600.0, tick: float = 15.0) -> bool:
+    """Block until tokens.json changes, or `limit` elapses.
+
+    Cheap local stat rather than retrying against BMW, so a dead credential
+    costs at most one request an hour instead of one every thirty seconds.
+    """
+    from .config import TOKEN_PATH
+
+    def stamp():
+        try:
+            return TOKEN_PATH.stat().st_mtime
+        except OSError:
+            return None
+
+    start, before = time.monotonic(), stamp()
+    while time.monotonic() - start < limit:
+        time.sleep(tick)
+        if stamp() != before:
+            print("[auth] credentials changed; retrying")
+            return True
+    return False
 
 
 def _single_instance(cfg: Config):
@@ -207,6 +271,15 @@ def _single_instance(cfg: Config):
 
 def run(cfg: Config, store: TokenStore) -> None:
     lock = _single_instance(cfg)  # noqa: F841 - held for the process lifetime
+
+    # launchd stops us with SIGTERM (bootout, kickstart -k, the menu bar's Stop
+    # and Restart). Python's default handler exits without unwinding, so the
+    # finally block below -- which drains the DB queue and flushes the sink --
+    # never ran in production. Raise instead, so shutdown is orderly.
+    def _terminate(signum, frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _terminate)
     sink = RawSink(cfg.data_dir)
     dbsink = DbSink(cfg)
     print(f"Raw sink: {sink.dir}")
@@ -222,7 +295,23 @@ def run(cfg: Config, store: TokenStore) -> None:
                 failures += 1
                 delay = _backoff(failures)
                 print(f"[auth] {exc}; retrying in {delay:.0f}s")
+                _status(cfg, "auth_retry", f"{exc} (retry in {delay:.0f}s)")
                 time.sleep(delay)
+                continue
+
+            except SystemExit as exc:
+                # An expired refresh token is fatal to *this* attempt but must
+                # not exit: KeepAlive would respawn us every 30s forever,
+                # hammering BMW's token endpoint ~2,880 times a day with a dead
+                # credential while launchctl still showed a healthy PID.
+                #
+                # Park instead, and watch tokens.json -- re-authorising from the
+                # menu bar rewrites it, so the stream heals by itself within
+                # seconds instead of needing a manual restart.
+                print(f"[auth] {exc}")
+                _status(cfg, "needs_auth", str(exc).splitlines()[0][:120])
+                if not _wait_for_new_tokens():
+                    print("[auth] still no new credentials; retrying anyway")
                 continue
 
             _assert_gcid(cfg, tokens)
@@ -231,12 +320,19 @@ def run(cfg: Config, store: TokenStore) -> None:
                 failures = 0
                 continue
             failures += 1
-            delay = REASON_DELAY.get(reason, 0) or _backoff(failures)
+            # max, not `or`: `or` used the mapped constant *instead of* the
+            # backoff, so a persistent 135 or 151 retried at a flat 30s/60s
+            # forever -- 2,880 connects a day against a credential that will
+            # never be accepted, and EXTENDED_BACKOFF unreachable for exactly
+            # the four codes it exists for. The constant is a floor, not a cap.
+            delay = max(REASON_DELAY.get(reason, 0), _backoff(failures))
             print(f"[mqtt] reconnecting in {delay:.0f}s (failure {failures})")
+            _status(cfg, "reconnecting", f"failure {failures}, retry in {delay:.0f}s")
             time.sleep(delay)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
+        _status(cfg, "stopped")
         sink.close()
         dbsink.close()
 
@@ -276,6 +372,7 @@ def _session(
         for topic in topics:
             client.subscribe(topic, qos=1)
         print(f"[mqtt] connected, subscribing to {', '.join(topics)}")
+        _status(cfg, "connected")
 
     def on_subscribe(client, userdata, mid, reason_codes, properties=None):
         # A refused subscription otherwise leaves us "connected" with no data
@@ -293,10 +390,20 @@ def _session(
         down.set()
 
     def on_message(client, userdata, msg):
-        body = sink.write(msg.topic, msg.payload)  # durable first
-        if isinstance(body, dict):
-            dbsink.write(body)  # enqueue only; never block this thread
-        print(f"{datetime.now().strftime('%H:%M:%S')} {_summarise(body)}")
+        # Guarded because paho re-raises callback exceptions and nothing between
+        # here and its thread main catches them: one raising message kills the
+        # network thread, on_disconnect never fires, and the session then waits
+        # out the whole token window and reports it as a CLEAN cycle -- which
+        # also resets the supervisor's failure counter. Fail loudly instead.
+        try:
+            body = sink.write(msg.topic, msg.payload)  # durable first
+            if isinstance(body, dict):
+                dbsink.write(body)  # enqueue only; never block this thread
+            print(f"{datetime.now().strftime('%H:%M:%S')} {_summarise(body)}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[mqtt] message handling failed: {exc!r}")
+            state["reason"] = None
+            down.set()
 
     # Client id = GCID: BMW allows one connection per GCID, so reusing the same
     # identifier makes a reconnect deterministically evict our own stale session
@@ -333,15 +440,43 @@ def _session(
         if down.is_set():
             return False, state["reason"]
 
-        # No stall watchdog here on purpose. The id_token expires hourly, so
-        # this loop already tears the connection down and rebuilds it every ~55
-        # minutes; a wedged subscription cannot outlive that. An additional
-        # silence timer would either duplicate the token cycle or fire while the
-        # car is legitimately parked and silent, which is most of the time.
-        if down.wait(timeout=hold):
-            return False, state["reason"]
-        print("[mqtt] token refresh due; cycling connection")
-        return True, None
+        # Two clocks, because neither alone is trustworthy here.
+        #
+        # macOS stops time.monotonic() while the machine is asleep, but the
+        # id_token expires on wall-clock time -- so a monotonic-only wait returns
+        # from a two-hour sleep believing it still has 50 minutes on a token that
+        # died an hour ago. Conversely a backward NTP step makes wall clock alone
+        # sit far past expiry. Take whichever deadline fires first.
+        wall_deadline = time.time() + hold
+        mono_deadline = time.monotonic() + hold
+        while True:
+            remaining = min(
+                wall_deadline - time.time(), mono_deadline - time.monotonic()
+            )
+            if remaining <= 0:
+                print("[mqtt] token refresh due; cycling connection")
+                return True, None
+
+            wall_before, mono_before = time.time(), time.monotonic()
+            woke = down.wait(timeout=min(30.0, remaining))
+
+            # Measure the gap BEFORE interpreting `woke`. On resume the network
+            # is gone, so paho usually fires on_disconnect first and wins the
+            # race -- checking `woke` first would classify every single wake as a
+            # connection failure, incrementing the backoff counter until a run of
+            # lid-closes earns a 10-minute outage on a feed that cannot backfill.
+            wall_elapsed = time.time() - wall_before
+            mono_elapsed = time.monotonic() - mono_before
+            # Wall advanced while monotonic did not: that is suspension, and
+            # unlike a bare wall-clock threshold it cannot be faked by an NTP
+            # step, which moves both clocks' *difference* not at all.
+            if wall_elapsed - mono_elapsed > 60:
+                print(f"[mqtt] resumed after {wall_elapsed / 60:.0f}m suspended; cycling")
+                return True, None
+            if woke:
+                return False, state["reason"]
+            _status(cfg, "connected")
     finally:
+        _status(cfg, "disconnected")
         client.disconnect()
         client.loop_stop()
