@@ -8,9 +8,11 @@ Control goes through launchd rather than signalling the process directly, so the
 supervisor's own view of the job stays correct.
 """
 
+import json
 import os
 import subprocess
 import threading
+import time
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,6 +29,8 @@ POLL_SECONDS = 10
 # A car silent this long is probably just parked, but it is the number worth
 # eyeballing, so surface it rather than hiding it.
 STALE_AFTER = 6 * 3600
+
+ICONS = Path(__file__).resolve().parent.parent / "assets" / "icons"
 
 PORTAL_STEPS = """Set this up in the My BMW portal first (about 3 minutes).
 
@@ -58,12 +62,16 @@ def _sh(*args) -> tuple[int, str]:
         return 1, str(exc)
 
 
-def _launchctl_jobs() -> dict[str, str]:
-    """label -> pid column, from `launchctl list`."""
+def _launchctl_jobs() -> dict[str, str] | None:
+    """label -> pid column, or None if launchctl itself could not be read.
+
+    None is distinct from {} on purpose: a launchctl that timed out means we do
+    not know the state, which should read as unknown rather than as stopped.
+    """
     code, out = _sh("launchctl", "list")
-    jobs = {}
     if code != 0:
-        return jobs
+        return None
+    jobs = {}
     for line in out.splitlines():
         parts = line.split("\t")
         if len(parts) >= 3:
@@ -71,13 +79,9 @@ def _launchctl_jobs() -> dict[str, str]:
     return jobs
 
 
-def _stream_pid() -> int | None:
-    pid = _launchctl_jobs().get(LABEL)
-    return int(pid) if pid and pid.isdigit() else None
-
-
 def _is_loaded() -> bool:
-    return LABEL in _launchctl_jobs()
+    jobs = _launchctl_jobs()
+    return bool(jobs) and LABEL in jobs
 
 
 def _copy(text: str) -> None:
@@ -97,12 +101,21 @@ def _human_age(seconds: float) -> str:
     return f"{seconds / 86400:.1f}d ago"
 
 
+# A heartbeat older than this means the subscriber is not maintaining it, even
+# if the process is alive. It refreshes every 30s while connected.
+HEARTBEAT_STALE = 120
+
+
 class Status:
     def __init__(self):
         self.configured = False
         self.authorised = False
+        self.known = True          # could we read launchctl at all?
         self.stream_pid: int | None = None
         self.loaded = False
+        self.stream_state = ""     # from the heartbeat file
+        self.stream_detail = ""
+        self.heartbeat_age: float | None = None
         self.db_up = False
         self.db_error = ""
         self.last_message: datetime | None = None
@@ -116,10 +129,23 @@ class Status:
         return (datetime.now(timezone.utc) - self.last_message).total_seconds()
 
     @property
+    def connected(self) -> bool:
+        """Actually subscribed, not merely running.
+
+        A live PID proves nothing: backoff loops, auth retry loops and DNS
+        failures all keep the process alive with the stream down.
+        """
+        if self.stream_state != "connected":
+            return False
+        return self.heartbeat_age is not None and self.heartbeat_age < HEARTBEAT_STALE
+
+    @property
     def glyph(self) -> str:
         if not self.configured or not self.authorised:
             return "⚙️"
-        if self.stream_pid is None:
+        if not self.known:
+            return "⚪"
+        if self.stream_pid is None or not self.connected:
             return "🔴"
         if not self.db_up:
             return "🟠"
@@ -128,24 +154,71 @@ class Status:
             return "🟡"
         return "🟢"
 
+    @property
+    def colour(self) -> str:
+        """Icon variant name, parallel to `glyph`."""
+        return {
+            "🟢": "green", "🟡": "yellow", "🟠": "orange",
+            "🔴": "red", "⚪": "grey", "⚙️": "grey",
+        }.get(self.glyph, "grey")
 
-def poll(cfg) -> Status:
+    @property
+    def stream_summary(self) -> str:
+        if not self.configured:
+            return "Not set up — use “Set up / re-authorise…”"
+        if not self.authorised:
+            return "Not authorised — use “Set up / re-authorise…”"
+        if not self.known:
+            return "Stream: unknown (launchctl unavailable)"
+        if self.stream_pid is None:
+            return "Stream: stopped" if not self.loaded else "Stream: loaded, not running"
+        if self.connected:
+            return f"Stream: connected (pid {self.stream_pid})"
+        if self.stream_state and self.heartbeat_age is not None:
+            detail = f" — {self.stream_detail}" if self.stream_detail else ""
+            return f"Stream: {self.stream_state}{detail}"
+        return f"Stream: running but not connected (pid {self.stream_pid})"
+
+
+def _read_heartbeat(cfg) -> tuple[str, str, float | None]:
+    try:
+        body = json.loads((cfg.data_dir / "stream.status").read_text())
+        return body.get("state", ""), body.get("detail", ""), time.time() - float(body["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return "", "", None
+
+
+def poll(cfg, with_counts: bool = True) -> Status:
     st = Status()
     st.configured = cfg is not None
     st.authorised = config.TOKEN_PATH.exists()
-    st.stream_pid = _stream_pid()
-    st.loaded = _is_loaded()
+
+    jobs = _launchctl_jobs()
+    st.known = jobs is not None
+    if jobs is not None:
+        st.loaded = LABEL in jobs
+        pid = jobs.get(LABEL)
+        st.stream_pid = int(pid) if pid and pid.isdigit() else None
+
     if cfg is None:
         return st
+    st.stream_state, st.stream_detail, st.heartbeat_age = _read_heartbeat(cfg)
+
+    # Short timeouts: this runs on the UI thread, and an unbounded wait here
+    # freezes the menu bar item itself.
     try:
-        with db.connect(cfg) as conn:
-            row = conn.execute(
-                "SELECT max(ts), count(*), count(DISTINCT key) FROM telemetry"
-            ).fetchone()
+        with db.connect(cfg, connect_timeout=3, statement_timeout_ms=4000) as conn:
+            if with_counts:
+                row = conn.execute(
+                    "SELECT max(ts), count(*), count(DISTINCT key) FROM telemetry"
+                ).fetchone()
+                st.rows, st.keys = (row[1], row[2]) if row else (0, 0)
+            else:
+                # max(ts) alone is an index-only scan; the counts are seq scans,
+                # so they run on a slower cadence.
+                row = conn.execute("SELECT max(ts) FROM telemetry").fetchone()
         st.db_up = True
         st.last_message = row[0].astimezone(timezone.utc) if row and row[0] else None
-        st.rows = row[1] if row else 0
-        st.keys = row[2] if row else 0
     except Exception as exc:  # noqa: BLE001 - the indicator must never crash
         st.db_up = False
         first = str(exc).strip().splitlines()
@@ -155,7 +228,7 @@ def poll(cfg) -> Status:
 
 class App(rumps.App):
     def __init__(self):
-        super().__init__("BMW", title="⚙️", quit_button=None)
+        super().__init__("BMW", title="", quit_button=None)
         self.cfg = self._load_config()
 
         self.item_stream = rumps.MenuItem("Stream: …")
@@ -196,19 +269,24 @@ class App(rumps.App):
     # ---- display ----------------------------------------------------------
 
     def refresh(self, _):
-        st = poll(self.cfg)
-        self.title = st.glyph
-
-        if not st.configured:
-            self.item_stream.title = "Not set up — use “Set up / re-authorise…”"
-        elif not st.authorised:
-            self.item_stream.title = "Not authorised — use “Set up / re-authorise…”"
-        elif st.stream_pid is not None:
-            self.item_stream.title = f"Stream: running (pid {st.stream_pid})"
-        elif st.loaded:
-            self.item_stream.title = "Stream: loaded but not running"
+        # Row/key counts are seq scans; only refresh them every few minutes.
+        self._ticks = getattr(self, "_ticks", 0) + 1
+        st = poll(self.cfg, with_counts=self._ticks % 30 == 1)
+        if not st.db_up or st.rows:
+            self._last_counts = (st.rows, st.keys)
         else:
-            self.item_stream.title = "Stream: stopped"
+            st.rows, st.keys = getattr(self, "_last_counts", (0, 0))
+
+        self._show(st)
+
+        # Tell the user the moment it breaks. A red glyph nobody is looking at
+        # is worth no more than no glyph, and the data is unrecoverable.
+        was = getattr(self, "_was_connected", None)
+        if was is True and st.authorised and not st.connected:
+            self._note("Stream down", st.stream_summary)
+        self._was_connected = st.connected if st.authorised else None
+
+        self.item_stream.title = st.stream_summary
 
         self.item_db.title = (
             "Database: up" if st.db_up
@@ -224,6 +302,23 @@ class App(rumps.App):
         self.item_retention.title = (
             f"Retention: {self.cfg.retention_days} days…" if self.cfg else "Retention…"
         )
+
+    def _show(self, st: "Status") -> None:
+        """Coloured roundel when the icons exist, emoji when they do not.
+
+        The icons are committed, so this normally takes the first branch. The
+        fallback covers a checkout where they were deleted or regenerated badly
+        -- an indicator that shows nothing at all is worse than one showing a
+        coloured dot.
+        """
+        icon = ICONS / f"status-{st.colour}.png"
+        if icon.exists():
+            if getattr(self, "_icon_path", None) != str(icon):
+                self.icon = str(icon)
+                self._icon_path = str(icon)
+            self.title = ""
+        else:
+            self.title = st.glyph
 
     def _note(self, title: str, message: str = ""):
         try:
@@ -348,7 +443,16 @@ class App(rumps.App):
 
     # ---- actions ----------------------------------------------------------
 
-    def _after(self, title: str, code: int, out: str):
+    def _after(self, title: str, code: int, out: str, expect_pid: bool = False):
+        if code == 0 and expect_pid:
+            # launchd has not necessarily spawned it yet. Refreshing immediately
+            # would show "stopped" right after a successful start, inviting a
+            # second click that then fails with "already bootstrapped".
+            for _ in range(6):
+                time.sleep(0.5)
+                jobs = _launchctl_jobs()
+                if jobs and jobs.get(LABEL, "-").isdigit():
+                    break
         self.refresh(None)  # reflect reality now, not at the next tick
         if code != 0:
             self._note(title, out or "failed")
@@ -358,7 +462,7 @@ class App(rumps.App):
         if not _is_loaded():
             return self.start(None)
         code, out = _sh("launchctl", "kickstart", "-k", f"{DOMAIN}/{LABEL}")
-        self._after("Restart failed", code, out)
+        self._after("Restart failed", code, out, expect_pid=True)
 
     def stop(self, _):
         code, out = _sh("launchctl", "bootout", f"{DOMAIN}/{LABEL}")
@@ -368,7 +472,7 @@ class App(rumps.App):
         if not PLIST.exists():
             return self._note("No agent installed", "Run ./launchd/install.sh")
         code, out = _sh("launchctl", "bootstrap", DOMAIN, str(PLIST))
-        self._after("Start failed", code, out)
+        self._after("Start failed", code, out, expect_pid=True)
 
     def open_map(self, _):
         """Rebuild from what is in the database right now, then open it."""
@@ -397,5 +501,26 @@ class App(rumps.App):
         rumps.quit_application()
 
 
+def _present_as_accessory() -> None:
+    """No Dock icon, and our own icon where one is still shown.
+
+    A menu bar utility has no business in the Dock or the ⌘-Tab switcher, and
+    without an explicit icon everything falls back to the generic Python rocket.
+    """
+    try:
+        from AppKit import NSApplication, NSImage
+
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(1)  # NSApplicationActivationPolicyAccessory
+        icon = ICONS / "app.png"
+        if icon.exists():
+            image = NSImage.alloc().initWithContentsOfFile_(str(icon))
+            if image:
+                app.setApplicationIconImage_(image)
+    except Exception:  # noqa: BLE001 - cosmetic only, never block startup
+        pass
+
+
 def run() -> None:
+    _present_as_accessory()
     App().run()

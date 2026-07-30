@@ -200,10 +200,27 @@ function showHover(v, pt, e) {
   push('Altitude', pt.alt != null ? `${pt.alt} m` : null);
   push('Fix', [pt.fix, pt.sats != null ? `${pt.sats} sats` : null].filter(Boolean).join(' · ') || null);
 
-  hoverEl.innerHTML =
-    `<div class="h">${new Date(t).toLocaleString()}</div>` +
-    `<div class="h"><span class="mode" style="background:${colourFor(pt)}"></span>${pt.mode}</div>` +
-    '<dl>' + rows.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join('') + '</dl>';
+  // Built as nodes rather than concatenated markup: `rows` carries units and
+  // enum values that originate from BMW's catalogue, not from us.
+  hoverEl.replaceChildren();
+  const when = document.createElement('div');
+  when.className = 'h';
+  when.textContent = new Date(t).toLocaleString();
+  const mode = document.createElement('div');
+  mode.className = 'h';
+  const swatch = document.createElement('span');
+  swatch.className = 'mode';
+  swatch.style.background = colourFor(pt);
+  mode.append(swatch, document.createTextNode(pt.mode));
+  const dl = document.createElement('dl');
+  for (const [k, val] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = k;
+    const dd = document.createElement('dd');
+    dd.textContent = val;
+    dl.append(dt, dd);
+  }
+  hoverEl.append(when, mode, dl);
 
   hoverEl.style.display = 'block';
   // Flip the box away from the pointer near the right/bottom edges so it never
@@ -311,7 +328,15 @@ function buildPanel(v) {
       const tile = document.createElement('div');
       tile.className = 'tile';
       tile.title = `${describeFor(k)}\n\n${k}`;
-      tile.innerHTML = `<div class="k">${labelFor(k)}</div><div class="v">—</div>`;
+      // textContent, not innerHTML: these labels come verbatim from BMW's
+      // public catalogue API and this page is published to GitHub Pages.
+      const kEl = document.createElement('div');
+      kEl.className = 'k';
+      kEl.textContent = labelFor(k);
+      const vEl = document.createElement('div');
+      vEl.className = 'v';
+      vEl.textContent = '—';
+      tile.append(kEl, vEl);
       grid.appendChild(tile);
       tiles.set(k, tile);
     }

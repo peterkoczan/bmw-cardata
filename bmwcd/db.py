@@ -9,8 +9,22 @@ import psycopg
 from .config import ROOT, Config
 
 
-def connect(cfg: Config):
-    return psycopg.connect(cfg.dsn, autocommit=True)
+def connect(cfg: Config, connect_timeout: int = 10, statement_timeout_ms: int = 0):
+    """Open a connection.
+
+    libpq's default connect timeout is infinite and the server's
+    statement_timeout is 0, so a wedged Postgres blocks the caller forever. That
+    is merely annoying in a CLI, but fatal in the menu bar app, where it runs on
+    the UI thread and freezes the very indicator you opened to diagnose it.
+    Callers that must stay responsive pass short timeouts; bulk paths do not.
+    """
+    options = f"-c statement_timeout={statement_timeout_ms}" if statement_timeout_ms else ""
+    return psycopg.connect(
+        cfg.dsn,
+        autocommit=True,
+        connect_timeout=connect_timeout,
+        **({"options": options} if options else {}),
+    )
 
 
 def init(cfg: Config) -> None:
@@ -26,10 +40,9 @@ _NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
 _VOCAB_CACHE: dict[str, dict] = {}
 
 
-def catalogue_is_numeric(spec: dict) -> bool:
-    from . import catalogue as cat
-
-    return cat.is_numeric(spec)
+def catalogue_is_textual(spec: dict) -> bool:
+    """True only when BMW positively says this key is not a number."""
+    return (spec.get("datatype") or "").lower() in {"string", "boolean", "enum"}
 
 
 def _bool_vocab(key: str, spec: dict) -> dict:
@@ -71,9 +84,13 @@ def _row(payload: dict, catalogue: dict | None = None):
             # the string "0.0" with unit kWh. Typing purely on the Python type
             # buries those in `txt` where every numeric query misses them, so
             # populate `num` as well when the value really is a number.
-            if _NUMERIC.match(token) and (
-                not spec or catalogue_is_numeric(spec) or entry.get("unit")
-            ):
+            # Gate on "not known to be non-numeric" rather than on an explicit
+            # allow-list: the catalogue has uint16/int16/int8 and 22 blank
+            # datatypes, and an allow-list left those quoted numerics stranded
+            # in txt with num NULL -- invisible to every numeric query. Unknown
+            # should default permissive, which is also how the no-catalogue path
+            # already behaved.
+            if _NUMERIC.match(token) and not catalogue_is_textual(spec):
                 try:
                     num = float(token)
                 except ValueError:

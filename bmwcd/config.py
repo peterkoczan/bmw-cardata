@@ -11,7 +11,10 @@ class Config:
         self.client_id: str = raw["client_id"]
         self.vins: list[str] = raw["vins"]
         self.expected_gcid: str | None = raw.get("gcid") or None
-        data_dir = Path(raw.get("data_dir", "data"))
+        # expanduser before is_absolute: "~/bmwdata" is not absolute, so without
+        # it the path resolves to <repo>/~/bmwdata -- real GPS traces written
+        # into the checkout, in a directory .gitignore's `data/` does not cover.
+        data_dir = Path(raw.get("data_dir", "data")).expanduser()
         self.data_dir = data_dir if data_dir.is_absolute() else ROOT / data_dir
         self.dsn: str = raw.get("dsn", "postgresql:///bmwcardata")
         self.retention_days: int = int(raw.get("retention_days", 30))

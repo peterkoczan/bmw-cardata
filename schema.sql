@@ -25,11 +25,6 @@ CREATE TABLE IF NOT EXISTS telemetry (
 CREATE INDEX IF NOT EXISTS telemetry_vin_key_ts_desc ON telemetry (vin, key, ts DESC);
 CREATE INDEX IF NOT EXISTS telemetry_ts ON telemetry (ts);
 
--- Location fixes pivoted into points.
---
--- Latitude and longitude arrive as separate messages but share an identical
--- measurement timestamp, so a plain group-by pairs them exactly -- no
--- interpolation, no time-bucket fudging. Confirmed against the first capture.
 -- BMW's own telematic data catalogue: display names, units, datatypes, value
 -- ranges and categories. Public, unauthenticated, refreshed with
 -- `bmwcd catalogue`. Joining against it beats inventing our own taxonomy.
@@ -49,66 +44,80 @@ CREATE TABLE IF NOT EXISTS catalogue (
 --
 -- Latitude and longitude arrive as separate messages. They have shared an
 -- identical measurement timestamp in every fix observed so far, but an exact
--- join silently drops a fix whenever they straddle a boundary -- one was lost
--- that way in the first capture. Pairing to the nearest partner within a few
--- seconds costs nothing and cannot produce a worse answer than discarding the
--- position entirely.
+-- join silently drops a fix whenever they straddle a boundary. Pairing to the
+-- nearest partner within a few seconds cannot produce a worse answer than
+-- discarding the position entirely.
+--
+-- Written against the base table with exact key equality rather than a CTE with
+-- LIKE. A multiply-referenced CTE is an optimisation fence: Postgres
+-- materialised it and every LATERAL then scanned the whole thing per latitude
+-- row, which measured as clean n-squared (360 fixes 0.28s, 2880 fixes 18.1s).
+-- Exact keys hit telemetry_vin_key_ts_desc; a prefix LIKE cannot under a
+-- non-C collation.
+--
+-- Validity predicates live INSIDE each LATERAL, not in the outer WHERE: above
+-- the LIMIT 1 a single out-of-range partner deletes the whole fix, instead of
+-- simply losing to the valid one two seconds away.
 DROP VIEW IF EXISTS location;
 CREATE VIEW location AS
-WITH loc AS (
-    SELECT vin, ts, key, num, txt
-    FROM telemetry
-    WHERE key LIKE 'vehicle.cabin.infotainment.navigation.currentLocation.%'
-),
-lat AS (
-    SELECT vin, ts, num AS lat FROM loc
-    WHERE key LIKE '%.latitude' AND num IS NOT NULL
-)
 SELECT
     l.vin,
     l.ts,
-    l.lat,
+    l.num AS lat,
     lo.lon,
     al.altitude_m,
     hd.heading_deg,
     sa.satellites,
     fx.fix_status
-FROM lat l
+FROM telemetry l
 CROSS JOIN LATERAL (
-    SELECT o.num AS lon FROM loc o
-    WHERE o.vin = l.vin AND o.key LIKE '%.longitude' AND o.num IS NOT NULL
+    SELECT o.num AS lon
+    FROM telemetry o
+    WHERE o.vin = l.vin
+      AND o.key = 'vehicle.cabin.infotainment.navigation.currentLocation.longitude'
+      AND o.num IS NOT NULL
+      AND o.num BETWEEN -180 AND 180
+      -- Null island is a sensor artefact, never a real position.
+      AND NOT (abs(l.num) < 0.1 AND abs(o.num) < 0.1)
       AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
-    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts))
+    LIMIT 1
 ) lo
 LEFT JOIN LATERAL (
-    SELECT o.num AS altitude_m FROM loc o
-    WHERE o.vin = l.vin AND o.key LIKE '%.altitude' AND o.num IS NOT NULL
+    SELECT o.num AS altitude_m FROM telemetry o
+    WHERE o.vin = l.vin
+      AND o.key = 'vehicle.cabin.infotainment.navigation.currentLocation.altitude'
+      AND o.num IS NOT NULL
       AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
     ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
 ) al ON true
 LEFT JOIN LATERAL (
-    SELECT o.num AS heading_deg FROM loc o
-    WHERE o.vin = l.vin AND o.key LIKE '%.heading' AND o.num IS NOT NULL
+    SELECT o.num AS heading_deg FROM telemetry o
+    WHERE o.vin = l.vin
+      AND o.key = 'vehicle.cabin.infotainment.navigation.currentLocation.heading'
+      AND o.num IS NOT NULL
       AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
     ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
 ) hd ON true
 LEFT JOIN LATERAL (
-    SELECT o.num AS satellites FROM loc o
-    WHERE o.vin = l.vin AND o.key LIKE '%.numberOfSatellites' AND o.num IS NOT NULL
+    SELECT o.num AS satellites FROM telemetry o
+    WHERE o.vin = l.vin
+      AND o.key = 'vehicle.cabin.infotainment.navigation.currentLocation.numberOfSatellites'
+      AND o.num IS NOT NULL
       AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
     ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
 ) sa ON true
 LEFT JOIN LATERAL (
-    SELECT o.txt AS fix_status FROM loc o
-    WHERE o.vin = l.vin AND o.key LIKE '%.fixStatus' AND o.txt IS NOT NULL
+    SELECT o.txt AS fix_status FROM telemetry o
+    WHERE o.vin = l.vin
+      AND o.key = 'vehicle.cabin.infotainment.navigation.currentLocation.fixStatus'
+      AND o.txt IS NOT NULL
       AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
     ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
 ) fx ON true
--- Null island is a sensor artefact, never a real position. The loose bound
--- catches near-zero noise as well as exact zeros.
-WHERE NOT (abs(l.lat) < 0.1 AND abs(lo.lon) < 0.1)
-  AND l.lat BETWEEN -90 AND 90
-  AND lo.lon BETWEEN -180 AND 180
+WHERE l.key = 'vehicle.cabin.infotainment.navigation.currentLocation.latitude'
+  AND l.num IS NOT NULL
+  AND l.num BETWEEN -90 AND 90
   -- Drop unresolved fixes. The catalogue says NO_FIX; the localised portal
   -- writes "NO FIX". Normalise rather than trusting either spelling.
   AND replace(replace(upper(coalesce(fx.fix_status, '')), '_', ''), ' ', '') <> 'NOFIX';
