@@ -30,19 +30,33 @@ CREATE INDEX IF NOT EXISTS telemetry_ts ON telemetry (ts);
 -- Latitude and longitude arrive as separate messages but share an identical
 -- measurement timestamp, so a plain group-by pairs them exactly -- no
 -- interpolation, no time-bucket fudging. Confirmed against the first capture.
-CREATE OR REPLACE VIEW location AS
-SELECT
-    vin,
-    ts,
-    max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.latitude')  AS lat,
-    max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.longitude') AS lon,
-    max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.altitude')  AS altitude_m,
-    max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.heading')   AS heading_deg
-FROM telemetry
-WHERE key LIKE 'vehicle.cabin.infotainment.navigation.currentLocation.%'
-GROUP BY vin, ts
-HAVING max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.latitude')  IS NOT NULL
-   AND max(num) FILTER (WHERE key = 'vehicle.cabin.infotainment.navigation.currentLocation.longitude') IS NOT NULL;
+DROP VIEW IF EXISTS location;
+CREATE VIEW location AS
+WITH fix AS (
+    SELECT
+        vin,
+        ts,
+        max(num) FILTER (WHERE key LIKE '%currentLocation.latitude')          AS lat,
+        max(num) FILTER (WHERE key LIKE '%currentLocation.longitude')         AS lon,
+        max(num) FILTER (WHERE key LIKE '%currentLocation.altitude')          AS altitude_m,
+        max(num) FILTER (WHERE key LIKE '%currentLocation.heading')           AS heading_deg,
+        max(num) FILTER (WHERE key LIKE '%currentLocation.numberOfSatellites') AS satellites,
+        max(txt) FILTER (WHERE key LIKE '%currentLocation.fixStatus')          AS fix_status
+    FROM telemetry
+    WHERE key LIKE 'vehicle.cabin.infotainment.navigation.currentLocation.%'
+    GROUP BY vin, ts
+)
+SELECT vin, ts, lat, lon, altitude_m, heading_deg, satellites, fix_status
+FROM fix
+WHERE lat IS NOT NULL
+  AND lon IS NOT NULL
+  -- Null island is a sensor artefact, never a real position.
+  AND NOT (lat = 0 AND lon = 0)
+  AND lat BETWEEN -90 AND 90
+  AND lon BETWEEN -180 AND 180
+  -- Drop unresolved fixes. Sources disagree on the spelling ("NO_FIX" vs
+  -- "NO FIX"), so normalise rather than matching a literal.
+  AND replace(replace(upper(coalesce(fix_status, '')), '_', ''), ' ', '') <> 'NOFIX';
 
 -- Latest value per key -- the "state as of now" a dashboard header wants.
 CREATE OR REPLACE VIEW latest AS
