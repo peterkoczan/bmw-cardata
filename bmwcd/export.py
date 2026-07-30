@@ -461,7 +461,8 @@ def build(cfg: Config, days: int | None = None) -> dict:
     seen = {k for v in vehicles for k in v["state"]}
     labels = {
         key: {
-            "n": spec[key].get("name"),
+            # BMW ships a handful of names with stray tabs and trailing space.
+            "n": " ".join((spec[key].get("name") or "").split()) or None,
             "c": CATEGORY_LABELS.get(spec[key].get("category"), "Other"),
             "d": spec[key].get("description"),
         }
