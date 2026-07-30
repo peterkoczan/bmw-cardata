@@ -160,6 +160,30 @@ Plus only at trip start and end. Expect a coarse polyline either way. Fixes
 reporting `NO_FIX`, null island, or out-of-range coordinates are dropped by the
 `location` view.
 
+### Trips, not one long line
+
+Nothing is transmitted while parked, so a day's fixes are several separate
+drives. Joining them all would draw roads that were never travelled and invent
+a consumption figure for distance nobody covered. Consecutive fixes are only
+connected when they look like continuous movement:
+
+| Rule | Threshold | Why |
+|---|---|---|
+| Gap ends a trip | 10 min | Longer silence means parked, not driving |
+| Below this, no movement | 10 m | Parked jitter, and BMW's repeated bursts |
+| Above this, no segment | 2 km | A tunnel catch-up, not a drive |
+
+Trips are listed under the map; clicking one zooms to it and scrubs the panel
+to how it finished.
+
+Odometer deltas are sanity-checked too — BMW has been known to report a km
+value labelled as miles — and fall back to GPS distance when implausible.
+
+State-panel labels and groupings come from the catalogue, so tiles read
+"Charging status of high-voltage battery" rather than a name derived from the
+key path. That label is also how we know `batteryManagement.header` really is
+state of charge.
+
 ## Catalogue
 
 ```

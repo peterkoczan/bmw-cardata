@@ -25,9 +25,15 @@ OUT = ROOT / "docs" / "demo.html"
 LAT0, LON0 = 52.3676, 4.9041
 START = datetime(2026, 3, 14, 8, 30, tzinfo=timezone.utc)
 
+# A 40-minute stop partway through, so the preview shows two separate trips
+# rather than one implausible continuous route.
+BREAK_AT, BREAK_MINUTES = 45, 40
+
 points = []
 for i in range(90):
     t = START + timedelta(seconds=45 * i)
+    if i >= BREAK_AT:
+        t += timedelta(minutes=BREAK_MINUTES)
     lat = LAT0 + 0.035 * math.sin(i / 14) + 0.010 * math.sin(i / 3.1)
     lon = LON0 + 0.055 * math.cos(i / 11) + 0.014 * math.cos(i / 4.3)
 
@@ -63,9 +69,19 @@ for i in range(90):
             "mode": mode,
             "intensity": round(intensity, 3),
             "km": 0.42,
+            "step_m": 420,
+            "trip": 0 if i < BREAK_AT else 1,
+            "draw": i not in (0, BREAK_AT),
             **extra,
         }
     )
+
+# The two fixes that open a trip are not joined to what came before.
+for i in (0, BREAK_AT):
+    points[i] |= {"mode": "start", "intensity": 0.0, "km": 0.0}
+    points[i].pop("kwh_per_100km", None)
+    points[i].pop("l_per_100km", None)
+    points[i].pop("kwh", None)
 
 
 def series(unit, fn):
@@ -97,6 +113,52 @@ state = {
     "vehicle.body.trunk.isOpen": series(None, lambda i: False),
 }
 
+trips = []
+for trip_id in (0, 1):
+    members = [p for p in points if p["trip"] == trip_id and p["draw"]]
+    if not members:
+        continue
+    modes: dict[str, float] = {}
+    for p in members:
+        modes[p["mode"]] = modes.get(p["mode"], 0.0) + p["km"]
+    trips.append(
+        {
+            "trip": trip_id,
+            "start": min(p["t"] for p in members),
+            "end": max(p["t"] for p in members),
+            "km": round(sum(p["km"] for p in members), 2),
+            "minutes": round(
+                (max(p["t"] for p in members) - min(p["t"] for p in members)) / 60000, 1
+            ),
+            "modes": modes,
+            "dominant": max(modes, key=modes.get),
+        }
+    )
+
+# Real BMW display names and categories when the catalogue has been fetched;
+# the page falls back to names derived from the key path otherwise.
+labels = {}
+try:
+    from bmwcd import catalogue as cat, config as _config
+
+    spec = cat.load(_config.load())
+    labels = {
+        k: {
+            "n": spec[k].get("name"),
+            "c": {
+                "BASIC_DATA": "Basic data", "VEHICLE_STATUS": "Vehicle status",
+                "USAGE_BASED": "Usage", "EVENTS": "Events",
+                "BEV_PHEV_DATA": "Battery & charging", "META_DATA": "Metadata",
+                "TYRE_DATA": "Tyres", "CD_CONTRACT": "Contract",
+            }.get(spec[k].get("category"), "Other"),
+            "d": spec[k].get("description"),
+        }
+        for k in state
+        if k in spec
+    }
+except Exception:  # noqa: BLE001 - the demo must build without a configured env
+    pass
+
 data = {
     "generated": START.isoformat(),
     "vehicles": [
@@ -106,9 +168,11 @@ data = {
             "battery_kwh": 26,
             "soc_key": "vehicle.drivetrain.batteryManagement.header",
             "points": points,
+            "trips": trips,
             "state": state,
         }
     ],
+    "labels": labels,
     "notes": ["Demo page — invented data, no real vehicle or location"],
 }
 
