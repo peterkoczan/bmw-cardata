@@ -63,6 +63,11 @@ FUEL_PCT_PER_100KM = (2.0, 12.0)
 # Below this a whole-kilometre odometer is too coarse to quote a firm figure.
 APPROX_BELOW_KM = 5.0
 
+# Derived speed is only close to the truth while the car cannot have gone far
+# off the straight line between two fixes. Past this the figure is still a valid
+# floor, but a weak one, so it is labelled rough rather than quoted plainly.
+SPEED_TRUSTWORTHY_GAP_S = 90
+
 # BMW's own categories, in its own rank order. Better than a taxonomy derived
 # from key prefixes, which splits related readings across made-up buckets.
 CATEGORY_LABELS = {
@@ -224,6 +229,15 @@ def _attribute_trips(points, trips, s):
         # only good to about +/-1 km -- on this 3 km drive that is a third of the
         # answer. Flag it rather than printing a decimal that implies precision
         # the input does not have.
+        minutes = (trip["end"] - trip["start"]) / 60000.0
+        if minutes > 0:
+            # Odometer distance over elapsed wall time. A real average rather
+            # than a floor, because the odometer measures the road -- but it
+            # spans the whole trip window, so traffic lights and the minutes
+            # spent parking at the end are in there. Labelled "incl. stops" for
+            # that reason: the first drive read 11 km/h for what was mostly
+            # 25-35 km/h of actual driving.
+            trip["avg_kmh"] = round(km / (minutes / 60.0))
         trip["approx"] = km < APPROX_BELOW_KM
         trip["mode"] = mode
         trip["intensity"] = round(intensity, 3)
@@ -382,6 +396,13 @@ def build(cfg: Config, days: int | None = None) -> dict:
                     # that "is this a straight road or a hole in the feed?" is
                     # the first question any long line raises.
                     point["gap_s"] = round(gap_s)
+                    # Speed BMW will not give us. Straight-line distance is a
+                    # lower bound on the road actually driven, so this is a
+                    # floor on the average speed, never an overestimate -- and
+                    # the longer the gap, the further below the truth it sits.
+                    if gap_s > 0 and step_m > 0:
+                        point["speed_kmh"] = round(step_m * 3.6 / gap_s)
+                        point["speed_rough"] = gap_s > SPEED_TRUSTWORTHY_GAP_S
 
                     if gap_s > GAP_SPLIT_SECONDS or step_m > MAX_STEP_M:
                         # A feed gap or a post-tunnel jump. Drawing across it
