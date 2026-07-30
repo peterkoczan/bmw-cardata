@@ -1,6 +1,7 @@
 """Postgres sink: raw CarData messages -> typed rows."""
 
 import json
+import re
 from pathlib import Path
 
 import psycopg
@@ -17,11 +18,29 @@ def init(cfg: Config) -> None:
         conn.execute((ROOT / "schema.sql").read_text())
 
 
-# ASN_isUnknown is deliberately absent: it stays text-only.
-ASN = {"asn_istrue": True, "asn_isfalse": False}
+# Fallback for when the catalogue has not been fetched yet. ASN_isUnknown is
+# deliberately absent: it stays text-only rather than becoming a false.
+ASN = {"ASN_ISTRUE": True, "ASN_ISFALSE": False}
+
+_NUMERIC = re.compile(r"^-?\d+(\.\d+)?$")
+_VOCAB_CACHE: dict[str, dict] = {}
 
 
-def _row(payload: dict):
+def catalogue_is_numeric(spec: dict) -> bool:
+    from . import catalogue as cat
+
+    return cat.is_numeric(spec)
+
+
+def _bool_vocab(key: str, spec: dict) -> dict:
+    if key not in _VOCAB_CACHE:
+        from . import catalogue as cat
+
+        _VOCAB_CACHE[key] = (cat.boolean_vocabulary(spec) if spec else {}) or ASN
+    return _VOCAB_CACHE[key]
+
+
+def _row(payload: dict, catalogue: dict | None = None):
     """Flatten one message into a telemetry row, or None if unusable.
 
     BMW sends exactly one key per message, but don't assume it -- yield each
@@ -36,6 +55,7 @@ def _row(payload: dict):
         if not isinstance(entry, dict):
             continue
         value = entry.get("value")
+        spec = (catalogue or {}).get(key, {})
         num = bool_ = txt = None
         # bool before int: bool is a subclass of int in Python, so the naive
         # order silently files every True/False as 1/0 in the numeric column.
@@ -45,14 +65,28 @@ def _row(payload: dict):
             num = float(value)
         elif value is not None:
             txt = str(value)
-            # Several keys BMW documents as boolean actually arrive as the ASN
-            # enum -- ASN_isTrue / ASN_isFalse / ASN_isUnknown. Normalise the
-            # two decidable cases so `bool` is queryable, but keep the raw text
-            # as well: "unknown" is a real third state and mapping it to false
-            # would invent a fact the car never reported.
-            asn = ASN.get(txt.strip().lower())
-            if asn is not None:
-                bool_ = asn
+            token = txt.strip().upper()
+
+            # Numbers sometimes arrive quoted -- batterySizeMax came through as
+            # the string "0.0" with unit kWh. Typing purely on the Python type
+            # buries those in `txt` where every numeric query misses them, so
+            # populate `num` as well when the value really is a number.
+            if _NUMERIC.match(token) and (
+                not spec or catalogue_is_numeric(spec) or entry.get("unit")
+            ):
+                try:
+                    num = float(token)
+                except ValueError:
+                    pass
+
+            # Many keys BMW documents as boolean ship bespoke vocabularies:
+            # OPEN/CLOSED, FLAP_UNLOCKED/FLAP_LOCKED, NOTCHOSEN/CHOSEN. Derive
+            # the mapping from the catalogue's own range rather than curating a
+            # table of BMW's synonyms for yes. Raw text is always kept: INVALID
+            # and UNKNOWN are real third states, not false.
+            vocab = _bool_vocab(key, spec)
+            if token in vocab and vocab[token] is not None:
+                bool_ = vocab[token]
         yield (
             entry.get("timestamp") or msg_ts,
             msg_ts,
@@ -72,10 +106,10 @@ ON CONFLICT (vin, key, ts) DO NOTHING
 """
 
 
-def write(conn, payload: dict) -> int:
+def write(conn, payload: dict, catalogue: dict | None = None) -> int:
     """Insert a message's rows. Returns rows actually stored, not attempted --
     BMW re-sends identical readings, so the difference is the duplicate count."""
-    rows = list(_row(payload))
+    rows = list(_row(payload, catalogue))
     if not rows:
         return 0
     with conn.cursor() as cur:
@@ -85,6 +119,9 @@ def write(conn, payload: dict) -> int:
 
 def load_jsonl(cfg: Config, paths: list[Path]) -> tuple[int, int]:
     """Backfill from the raw sink. Idempotent -- safe to re-run over old files."""
+    from . import catalogue as cat
+
+    spec = cat.load(cfg)
     seen = written = 0
     with connect(cfg) as conn:
         for path in paths:
@@ -99,7 +136,7 @@ def load_jsonl(cfg: Config, paths: list[Path]) -> tuple[int, int]:
                 payload = record.get("payload")
                 if isinstance(payload, dict):
                     seen += 1
-                    written += write(conn, payload)
+                    written += write(conn, payload, spec)
     return seen, written
 
 
