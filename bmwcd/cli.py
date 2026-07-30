@@ -1,7 +1,7 @@
 import sys
 from datetime import date, datetime, timedelta
 
-from . import auth, config, db, export, stream
+from . import auth, catalogue, config, db, export, stream
 
 USAGE = """usage: python -m bmwcd <command>
 
@@ -12,6 +12,7 @@ USAGE = """usage: python -m bmwcd <command>
   load     backfill Postgres from the raw JSONL sink (idempotent)
   prune    drop rows and raw files past their retention windows
   export   render the map page to data/viz/map.html  [--days N]
+  catalogue  refresh BMW's telematic data catalogue (public API, no auth)
 """
 
 
@@ -92,6 +93,15 @@ def main(argv: list[str] | None = None) -> int:
                 path.unlink()
                 removed += 1
         print(f"Removed {removed} raw file(s) older than {cfg.raw_retention_days} days.")
+        return 0
+
+    if cmd == "catalogue":
+        items = catalogue.fetch()
+        path = catalogue.save(cfg, items)
+        loaded = catalogue.load_into_db(cfg, items)
+        streamable = sum(1 for e in items if e.get("streamable"))
+        print(f"Fetched {len(items)} keys ({streamable} streamable) -> {path}")
+        print(f"Loaded {loaded} rows into catalogue")
         return 0
 
     if cmd == "export":

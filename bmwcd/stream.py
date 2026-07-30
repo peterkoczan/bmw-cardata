@@ -1,10 +1,11 @@
-"""MQTT subscriber for the CarData stream -> raw JSONL on disk.
+"""MQTT subscriber for the CarData stream -> raw JSONL on disk and Postgres.
 
-Milestone 1: prove the pipe works and lose nothing. Structure comes later --
-persist raw first, transform second.
+Raw JSONL is written first and is the source of truth: the feed is forward-only,
+so anything not captured at the moment it arrives is gone for good.
 """
 
 import json
+import queue
 import ssl
 import threading
 import time
@@ -16,12 +17,13 @@ import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 
 from . import db
-from .auth import REFRESH_MARGIN, TokenStore, Tokens
+from .auth import REFRESH_MARGIN, AuthRetryable, TokenStore, Tokens
 from .config import Config
 
 HOST = "customer.streaming-cardata.bmwgroup.com"
 PORT = 9000
 KEEPALIVE = 30  # BMW requires <= 30s
+CONNECT_TIMEOUT = 20  # no CONNACK by now means a wedged handshake
 
 
 class RawSink:
@@ -94,36 +96,88 @@ def _summarise(body) -> str:
 
 
 class DbSink:
-    """Best-effort Postgres writer.
+    """Best-effort Postgres writer, drained on its own thread.
 
     The raw JSONL is the source of truth, so a database that is down, slow or
-    mid-restart must never cost us a message or stall the MQTT loop. Failures
-    are logged once per outage and the connection is reopened on the next
-    message; the gap is repaired later with `bmwcd load`.
+    mid-restart must never cost us a message. It must also never block: writing
+    inline on paho's network thread means a stalled Postgres delays PINGREQ past
+    the 30s keep-alive and BMW drops the connection -- a database problem
+    becoming a data-loss problem.
+
+    So `write` only enqueues. The queue is bounded: an unbounded one just trades
+    a stall for unbounded memory growth. On overflow we drop and count, because
+    the JSONL still has everything and `bmwcd load` repairs the gap.
     """
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, maxsize: int = 10_000):
+        from . import catalogue as cat
+
         self.cfg = cfg
+        self.catalogue = cat.load(cfg)  # empty until `bmwcd catalogue` is run
+        self.queue: queue.Queue = queue.Queue(maxsize=maxsize)
         self.conn = None
         self.degraded = False
+        self.dropped = 0
+        self._stop = threading.Event()
+        self._worker = threading.Thread(target=self._drain, daemon=True)
+        self._worker.start()
 
     def write(self, payload: dict) -> None:
         try:
-            if self.conn is None or self.conn.closed:
-                self.conn = db.connect(self.cfg)
-            db.write(self.conn, payload)
-            if self.degraded:
-                print("[db] reconnected")
-                self.degraded = False
-        except Exception as exc:  # noqa: BLE001 - never let the DB break capture
-            if not self.degraded:
-                print(f"[db] unavailable, raw capture continues: {exc}")
-                self.degraded = True
-            self.conn = None
+            self.queue.put_nowait(payload)
+        except queue.Full:
+            self.dropped += 1
+            if self.dropped % 100 == 1:
+                print(f"[db] queue full, {self.dropped} message(s) not stored "
+                      f"(raw JSONL intact; repair with: bmwcd load)")
+
+    def _drain(self) -> None:
+        while not self._stop.is_set():
+            try:
+                payload = self.queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                if self.conn is None or self.conn.closed:
+                    self.conn = db.connect(self.cfg)
+                db.write(self.conn, payload, self.catalogue)
+                if self.degraded:
+                    print("[db] reconnected")
+                    self.degraded = False
+            except Exception as exc:  # noqa: BLE001 - never let the DB break capture
+                if not self.degraded:
+                    print(f"[db] unavailable, raw capture continues: {exc}")
+                    self.degraded = True
+                self.conn = None
+                time.sleep(1.0)  # do not spin against a down database
+            finally:
+                self.queue.task_done()
 
     def close(self) -> None:
+        self._stop.set()
+        self._worker.join(timeout=5)
         if self.conn is not None and not self.conn.closed:
             self.conn.close()
+
+
+# MQTT v5 reason codes worth pausing longer for. Reconnecting fast against
+# "quota exceeded" is how you stay quota-exceeded.
+REASON_DELAY = {
+    151: 60,  # Quota exceeded
+    135: 30,  # Not authorized
+    128: 20,  # Unspecified error
+    133: 20,  # Server busy
+}
+BASE_BACKOFF = 5
+MAX_BACKOFF = 300
+EXTENDED_AFTER = 10  # consecutive failures before backing off much harder
+EXTENDED_BACKOFF = 600
+
+
+def _backoff(failures: int) -> float:
+    if failures >= EXTENDED_AFTER:
+        return EXTENDED_BACKOFF
+    return min(BASE_BACKOFF * (2 ** max(0, failures - 1)), MAX_BACKOFF)
 
 
 def run(cfg: Config, store: TokenStore) -> None:
@@ -131,11 +185,29 @@ def run(cfg: Config, store: TokenStore) -> None:
     dbsink = DbSink(cfg)
     print(f"Raw sink: {sink.dir}")
     print(f"Database: {cfg.dsn}")
+    failures = 0
     try:
         while True:
-            tokens = store.fresh()
+            try:
+                tokens = store.fresh()
+            except AuthRetryable as exc:
+                # Transient: a blip at refresh time must not kill the process
+                # and hand launchd a crash loop against BMW's auth endpoint.
+                failures += 1
+                delay = _backoff(failures)
+                print(f"[auth] {exc}; retrying in {delay:.0f}s")
+                time.sleep(delay)
+                continue
+
             _assert_gcid(cfg, tokens)
-            _session(cfg, tokens, sink, dbsink)
+            ok, reason = _session(cfg, tokens, sink, dbsink)
+            if ok:
+                failures = 0
+                continue
+            failures += 1
+            delay = REASON_DELAY.get(reason, 0) or _backoff(failures)
+            print(f"[mqtt] reconnecting in {delay:.0f}s (failure {failures})")
+            time.sleep(delay)
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
@@ -151,18 +223,27 @@ def _assert_gcid(cfg: Config, tokens: Tokens) -> None:
         )
 
 
-def _session(cfg: Config, tokens: Tokens, sink: RawSink, dbsink: "DbSink") -> None:
+def _session(
+    cfg: Config, tokens: Tokens, sink: RawSink, dbsink: "DbSink"
+) -> tuple[bool, int | None]:
     """One MQTT connection, torn down when the id_token nears expiry.
 
     Rebuilding on every refresh is deliberate: reusing a connection across a
     token change can leave it wedged in an unauthorised state after a network
     blip, even when BMW re-issues an identical token.
+
+    Returns (clean, reason_code) so the caller can tell an orderly token cycle
+    from a failure and back off accordingly.
     """
     down = threading.Event()
+    connected = threading.Event()
+    state = {"reason": None, "last_message": time.monotonic()}
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
+        connected.set()
         if reason_code != 0:
             print(f"[mqtt] connect refused: {reason_code}")
+            state["reason"] = int(getattr(reason_code, "value", reason_code))
             down.set()
             return
         topics = _topics(cfg, tokens.gcid)
@@ -174,19 +255,22 @@ def _session(cfg: Config, tokens: Tokens, sink: RawSink, dbsink: "DbSink") -> No
         # A refused subscription otherwise leaves us "connected" with no data
         # and no error. Treat any failure code (>= 0x80) as fatal for this
         # session so the supervisor rebuilds rather than sitting on a dead socket.
-        failed = [str(rc) for rc in reason_codes if int(rc.value) >= 0x80]
+        failed = [rc for rc in reason_codes if int(rc.value) >= 0x80]
         if failed:
-            print(f"[mqtt] subscription refused: {failed}")
+            print(f"[mqtt] subscription refused: {[str(r) for r in failed]}")
+            state["reason"] = int(failed[0].value)
             down.set()
 
     def on_disconnect(client, userdata, flags, reason_code, properties=None):
         print(f"[mqtt] disconnected: {reason_code}")
+        state["reason"] = int(getattr(reason_code, "value", reason_code) or 0)
         down.set()
 
     def on_message(client, userdata, msg):
+        state["last_message"] = time.monotonic()
         body = sink.write(msg.topic, msg.payload)  # durable first
         if isinstance(body, dict):
-            dbsink.write(body)
+            dbsink.write(body)  # enqueue only; never block this thread
         print(f"{datetime.now().strftime('%H:%M:%S')} {_summarise(body)}")
 
     # Client id = GCID: BMW allows one connection per GCID, so reusing the same
@@ -207,19 +291,39 @@ def _session(cfg: Config, tokens: Tokens, sink: RawSink, dbsink: "DbSink") -> No
     hold = max(60.0, tokens.seconds_left() - REFRESH_MARGIN)
     print(f"[mqtt] connecting; token good for {int(tokens.seconds_left())}s")
 
-    try:
-        client.connect(HOST, PORT, keepalive=KEEPALIVE)
-    except OSError as exc:
-        print(f"[mqtt] connect failed: {exc}; retrying in 30s")
-        time.sleep(30)
-        return
-
+    # connect_async + loop_start rather than blocking connect(): a wedged TLS
+    # handshake never fires a callback and a blocking connect can hang there
+    # indefinitely, with no keep-alive to notice and nothing to time it out.
     client.loop_start()
     try:
-        if down.wait(timeout=hold):
-            time.sleep(10)  # unexpected drop -- breathe before reconnecting
-        else:
-            print("[mqtt] token refresh due; cycling connection")
+        try:
+            client.connect_async(HOST, PORT, keepalive=KEEPALIVE)
+        except OSError as exc:
+            print(f"[mqtt] connect failed: {exc}")
+            return False, None
+
+        if not connected.wait(timeout=CONNECT_TIMEOUT):
+            print(f"[mqtt] no CONNACK within {CONNECT_TIMEOUT}s")
+            return False, None
+        if down.is_set():
+            return False, state["reason"]
+
+        deadline = time.monotonic() + hold
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                print("[mqtt] token refresh due; cycling connection")
+                return True, None
+            if down.wait(timeout=min(60.0, remaining)):
+                return False, state["reason"]
+            # Watchdog for a broker that holds the socket open but stops
+            # publishing. Deliberately generous: a parked car is legitimately
+            # silent for many hours, so a short timer would churn all night for
+            # nothing. This only catches a genuinely wedged subscription.
+            silent = time.monotonic() - state["last_message"]
+            if silent > cfg.stall_timeout:
+                print(f"[mqtt] no messages for {silent / 3600:.1f}h; rebuilding")
+                return False, None
     finally:
         client.disconnect()
         client.loop_stop()

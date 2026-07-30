@@ -64,6 +64,10 @@ class Tokens:
         return self.expires_at - time.time()
 
 
+class AuthRetryable(Exception):
+    """Transient refresh failure -- network or BMW-side. Back off, do not exit."""
+
+
 class TokenStore:
     def __init__(self, path: Path, client_id: str):
         self.path = path
@@ -75,26 +79,44 @@ class TokenStore:
         return Tokens(json.loads(self.path.read_text()))
 
     def save(self, data: dict) -> Tokens:
-        # 0600 -- refresh token is a two-week credential.
-        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Write-then-rename. BMW rotates the refresh token on every refresh, so
+        # truncating the real file first means a crash mid-write destroys the
+        # only copy of a two-week credential and forces an interactive re-auth
+        # -- painful on a headless host. 0600: it is a credential.
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as fh:
             json.dump(data, fh, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, self.path)
         return Tokens(data)
 
     def refresh(self, tokens: Tokens) -> Tokens:
-        resp = requests.post(
-            TOKEN_URL,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": tokens.refresh_token,
-                "client_id": self.client_id,
-            },
-            timeout=30,
-        )
+        try:
+            resp = requests.post(
+                TOKEN_URL,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": tokens.refresh_token,
+                    "client_id": self.client_id,
+                },
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            # DNS blip, TLS reset, timeout. Nothing is wrong with the credential.
+            raise AuthRetryable(f"refresh request failed: {exc}") from exc
+
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"Refresh failed ({resp.status_code}): {resp.text}\n"
+            body = resp.text
+            fatal = "invalid_grant" in body or "invalid_token" in body
+            # 5xx and 429 are BMW's problem and will pass; anything else 4xx
+            # means the credential or the client is wrong and a human is needed.
+            if not fatal and (resp.status_code >= 500 or resp.status_code == 429):
+                raise AuthRetryable(f"refresh failed ({resp.status_code}), retrying")
+            raise SystemExit(
+                f"Refresh rejected ({resp.status_code}): {body}\n"
                 "If the refresh token has expired (~2 weeks), re-run: bmwcd auth"
             )
         body = resp.json()
