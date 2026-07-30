@@ -40,6 +40,9 @@ ENGINE_KEYS = (
     "vehicle.drivetrain.engine.isActive",
 )
 HV_STATUS = "vehicle.drivetrain.electricEngine.charging.hvStatus"
+# hvStatus did not arrive on the first real drive; charging power did, and a
+# non-zero value is equally good evidence that the car is plugged in.
+CHARGE_POWER = "vehicle.powertrain.electric.battery.charging.power"
 
 # Route stitching. Position updates arrive every ~3 min or 2 km on Live Cockpit
 # Professional, and not at all while parked, so consecutive fixes are not
@@ -56,6 +59,9 @@ ODOMETER_DECREASE_TOLERANCE_KM = -1.0
 ELECTRIC_KWH_PER_100KM = (12.0, 40.0)
 FUEL_L_PER_100KM = (4.0, 16.0)
 FUEL_PCT_PER_100KM = (2.0, 12.0)
+
+# Below this a whole-kilometre odometer is too coarse to quote a firm figure.
+APPROX_BELOW_KM = 5.0
 
 # BMW's own categories, in its own rank order. Better than a taxonomy derived
 # from key prefixes, which splits related readings across made-up buckets.
@@ -124,74 +130,119 @@ def _odometer_delta(dist: Series, prev_t, t):
     return km if km > 0 else 0.0
 
 
-def _mode(prev_t, t, s, fallback_km):
-    """Classify the drive between two fixes.
+def _segment(prev_t, t, s, gps_km):
+    """Classify one leg of a route.
 
-    CarData exposes no instantaneous power or fuel-flow signal at all -- every
-    consumption key is a lifetime total, a per-trip accumulator or a running
-    average. So mode is derived: engine state splits petrol from electric, and
-    the shade comes from differencing state of charge or fuel level over the
-    distance covered between the two fixes.
+    Distance is GPS, not the odometer. `travelledDistance` is whole kilometres
+    while fixes arrive roughly every 50 seconds, so on a real drive one segment
+    reported km=1.0 for 401 m of movement and its neighbours reported nothing at
+    all. The odometer is still the better measure of a whole trip; it is simply
+    coarser than a single leg.
+
+    Energy is deliberately NOT computed here. State of charge is an integer
+    percent, so on a 26 kWh pack one tick is 0.26 kWh -- over a 344 m leg that
+    is mechanically 75.6 kWh/100km. The first real drive produced 26.0, 75.7 and
+    61.4 kWh/100km on consecutive legs of a car that does about 25. Those
+    numbers were quantisation, not consumption, so consumption is worked out per
+    trip instead and applied back to the legs.
     """
-    km = _odometer_delta(s["dist"], prev_t, t)
-    if not km:
-        # `not km`, not `is None`: travelledDistance is whole kilometres while
-        # fixes arrive every ~3 minutes, so most city segments span less than
-        # one odometer tick and the delta is a legitimate 0.0. The odometer can
-        # prove the car moved; at that resolution it can never prove it didn't.
-        km = fallback_km
-    if not km or km <= 0:
-        return {"mode": "idle", "intensity": 0.0, "km": km or 0.0}
+    if not gps_km or gps_km <= 0:
+        return {"mode": "idle", "intensity": 0.0, "km": 0.0}
 
+    out = {"km": round(gps_km, 3)}
     soc0, soc1 = s["soc"].at(prev_t), s["soc"].at(t)
     d_soc = (soc1 - soc0) if (soc0 is not None and soc1 is not None) else None
-    battery = s["battery_kwh"]
 
-    engine_on = any(series.at(t) for series in s["engine"] if series)
     hv = (s["hv"].at(t) or "") if s["hv"] else ""
-    plugged = hv.upper() in {"CHARGING", "WAITING_FOR_CHARGING"}
+    power = s["charge_power"].at(t) if s["charge_power"] else None
+    plugged = hv.upper() in {"CHARGING", "WAITING_FOR_CHARGING"} or bool(power)
 
-    out = {"km": round(km, 3)}
-
-    # BMW reports integer SoC, so treat anything inside half a point as noise
-    # rather than as a real change.
+    # Charge climbing while moving and not plugged in is recuperation. This one
+    # signal IS reliable per-leg: a rising integer is unambiguous, where a
+    # falling one is mostly rounding.
     if d_soc is not None and d_soc > 0.5 and not plugged:
-        kwh = (d_soc / 100.0) * battery if battery else 0.0
-        return out | {
-            "mode": "regen",
-            "intensity": _scale(kwh / km * 100, *ELECTRIC_KWH_PER_100KM),
-            "kwh": round(kwh, 3),
-        }
+        return out | {"mode": "regen", "intensity": 0.6}
 
-    if engine_on:
-        l0, l1 = s["fuel_l"].at(prev_t), s["fuel_l"].at(t)
+    return out | {"mode": "pending", "intensity": 0.0}
+
+
+def _attribute_trips(points, trips, s):
+    """Work out consumption per trip, then colour that trip's legs with it.
+
+    Over a whole trip the integer SoC steps average out: the first real drive
+    was 59% -> 55% over 4.01 km, which on a 26 kWh pack is 25.9 kWh/100km --
+    the right answer for the car, from the same data that gave nonsense per leg.
+    """
+    battery = s["battery_kwh"]
+    by_trip = {t["trip"]: t for t in trips}
+
+    for trip in trips:
+        legs = [p for p in points if p.get("trip") == trip["trip"] and p.get("draw")]
+        if not legs:
+            continue
+        start, end = min(p["ts"] for p in legs), max(p["ts"] for p in legs)
+        gps_km = sum(p.get("km") or 0.0 for p in legs)
+
+        # Odometer for the trip total, GPS only as a fallback. Straight lines
+        # between fixes 50 seconds apart cut every corner: the first real drive
+        # summed to 2.5 km of hops for 4 km of road, which inflated consumption
+        # to 41.5 kWh/100km. The odometer measures the road, and over a whole
+        # trip its whole-kilometre resolution is a much smaller error than the
+        # geometry one.
+        odo_km = _odometer_delta(s["dist"], start, end)
+        km = odo_km if odo_km and odo_km > 0 else gps_km
+        trip["gps_km"] = round(gps_km, 2)
+        trip["odometer_km"] = round(odo_km, 2) if odo_km else None
+        if km <= 0:
+            continue
+
+        soc0, soc1 = s["soc"].at(start), s["soc"].at(end)
+        d_soc = (soc0 - soc1) if (soc0 is not None and soc1 is not None) else None
+        l0, l1 = s["fuel_l"].at(start), s["fuel_l"].at(end)
         d_litres = (l0 - l1) if (l0 is not None and l1 is not None) else None
+        p0, p1 = s["fuel_pct"].at(start), s["fuel_pct"].at(end)
+        d_fuel_pct = (p0 - p1) if (p0 is not None and p1 is not None) else None
+
+        mode, intensity = "unknown", 0.0
+        # Fuel moving is the only positive evidence of the engine having run --
+        # the engine-state keys did not arrive on the first real drive, so this
+        # cannot depend on them.
         if d_litres and d_litres > 0:
             per100 = d_litres / km * 100
-            return out | {
-                "mode": "petrol",
-                "intensity": _scale(per100, *FUEL_L_PER_100KM),
-                "l_per_100km": round(per100, 1),
-            }
-        p0, p1 = s["fuel_pct"].at(prev_t), s["fuel_pct"].at(t)
-        d_pct = (p0 - p1) if (p0 is not None and p1 is not None) else None
-        per100 = (d_pct / km * 100) if d_pct and d_pct > 0 else None
-        return out | {
-            "mode": "petrol",
-            "intensity": _scale(per100, *FUEL_PCT_PER_100KM) if per100 else 0.5,
-            **({"fuel_pct_per_100km": round(per100, 2)} if per100 else {}),
-        }
+            mode, intensity = "petrol", _scale(per100, *FUEL_L_PER_100KM)
+            trip["l_per_100km"] = round(per100, 1)
+        elif d_fuel_pct and d_fuel_pct > 0:
+            per100 = d_fuel_pct / km * 100
+            mode, intensity = "petrol", _scale(per100, *FUEL_PCT_PER_100KM)
+            trip["fuel_pct_per_100km"] = round(per100, 2)
+        elif d_soc and d_soc > 0 and battery:
+            per100 = (d_soc / 100.0) * battery / km * 100
+            mode, intensity = "electric", _scale(per100, *ELECTRIC_KWH_PER_100KM)
+            trip["kwh_per_100km"] = round(per100, 1)
 
-    if d_soc is not None and d_soc < -0.5:
-        kwh = (-d_soc / 100.0) * battery if battery else 0.0
-        per100 = kwh / km * 100
-        return out | {
-            "mode": "electric",
-            "intensity": _scale(per100, *ELECTRIC_KWH_PER_100KM),
-            "kwh_per_100km": round(per100, 1),
-        }
+        # The odometer is whole kilometres, so on a short trip the distance is
+        # only good to about +/-1 km -- on this 3 km drive that is a third of the
+        # answer. Flag it rather than printing a decimal that implies precision
+        # the input does not have.
+        trip["approx"] = km < APPROX_BELOW_KM
+        trip["mode"] = mode
+        trip["intensity"] = round(intensity, 3)
 
-    return out | {"mode": "unknown", "intensity": 0.0}
+        for leg in legs:
+            if leg["mode"] in {"regen", "idle"}:
+                continue  # measured per leg, keep it
+            leg["mode"] = mode
+            leg["intensity"] = intensity
+            leg["approx"] = trip["approx"]
+            for field in ("kwh_per_100km", "l_per_100km", "fuel_pct_per_100km"):
+                if field in trip:
+                    leg[field] = trip[field]
+
+    # Anything still pending had no trip-level evidence either way.
+    for p in points:
+        if p.get("mode") == "pending":
+            p["mode"] = "unknown"
+    return by_trip
 
 
 def _state_series(conn, vin: str, since) -> dict:
@@ -293,6 +344,7 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 "battery_kwh": battery_kwh,
                 "engine": [_series(conn, vin, k, "bool") for k in ENGINE_KEYS],
                 "hv": _series(conn, vin, HV_STATUS, "txt"),
+                "charge_power": _series(conn, vin, CHARGE_POWER),
             }
 
             if not fixes:
@@ -342,7 +394,7 @@ def build(cfg: Config, days: int | None = None) -> dict:
                         point |= {"mode": "idle", "intensity": 0.0, "km": 0.0,
                                   "trip": trip_id, "draw": False}
                     else:
-                        point |= _mode(prev["ts"], ts, s, step_m / 1000.0)
+                        point |= _segment(prev["ts"], ts, s, step_m / 1000.0)
                         point |= {"trip": trip_id, "draw": True}
 
                 point["ts"] = ts  # internal; stripped before serialising
@@ -355,6 +407,16 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 notes.append(f"{vin}: {stationary} stationary fix(es) below {MIN_STEP_M} m")
 
             trips = _trips(points)
+            _attribute_trips(points, trips, s)
+            # Recompute totals: legs were reclassified, and _trips summed the
+            # provisional modes.
+            for trip in trips:
+                legs = [p for p in points if p.get("trip") == trip["trip"] and p.get("draw")]
+                # Report the odometer distance when we have it: that is how far
+                # the car actually went, not how far the straight lines add up to.
+                trip["km"] = trip.get("odometer_km") or round(
+                    sum(p.get("km") or 0.0 for p in legs), 2)
+                trip["dominant"] = trip.get("mode") or "unknown"
             for p in points:
                 p.pop("ts", None)
 
