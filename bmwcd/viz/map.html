@@ -173,9 +173,11 @@ function speedAt(v, t) {
 }
 
 function consumptionOf(pt) {
-  if (pt.kwh_per_100km != null) return `${pt.kwh_per_100km} kWh/100km`;
-  if (pt.l_per_100km != null) return `${pt.l_per_100km} l/100km`;
-  if (pt.fuel_pct_per_100km != null) return `${pt.fuel_pct_per_100km} %/100km`;
+  // "~" where the odometer's whole-kilometre resolution dominates the answer.
+  const a = pt.approx ? '~' : '';
+  if (pt.kwh_per_100km != null) return `${a}${pt.kwh_per_100km} kWh/100km`;
+  if (pt.l_per_100km != null) return `${a}${pt.l_per_100km} l/100km`;
+  if (pt.fuel_pct_per_100km != null) return `${a}${pt.fuel_pct_per_100km} %/100km`;
   if (pt.kwh != null) return `${pt.kwh} kWh recovered`;
   return null;
 }
@@ -265,13 +267,19 @@ const layers = routed.map(v => {
   return { v, segs, marker };
 });
 
-if (routed.length) {
-  const pts = routed.flatMap(v => v.points.map(p => [p.lat,p.lon]));
-  map.fitBounds(L.latLngBounds(pts).pad(0.25));
+// Deferred to after layout. The bar's height comes from a CSS variable, so at
+// script-execution time #map can still measure zero -- Leaflet then fits the
+// bounds against nothing and lands on zoom 0, showing the whole world with the
+// route an invisible speck. invalidateSize() once the geometry is real fixes it.
+function fitToRoute() {
+  map.invalidateSize();
+  if (!routed.length) { map.setView([52.1, 5.1], 8); return; }
+  const bounds = L.latLngBounds(routed.flatMap(v => v.points.map(p => [p.lat, p.lon])));
+  map.fitBounds(bounds.pad(0.25));
   if (map.getZoom() > 16) map.setZoom(15);
-} else {
-  map.setView([52.1, 5.1], 8);
 }
+requestAnimationFrame(() => requestAnimationFrame(fitToRoute));
+window.addEventListener('resize', () => map.invalidateSize());
 
 /* ---------- timeline ---------- */
 // State changes count as timeline events too, so a vehicle that never reports a
@@ -430,6 +438,8 @@ function buildTrips(v) {
     const b = document.createElement('button');
     const when = new Date(t.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
+    if (t.kwh_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.kwh_per_100km} kWh/100km`;
+    if (t.l_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.l_per_100km} l/100km`;
     b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
     b.title = `${new Date(t.start).toLocaleString()} → ${new Date(t.end).toLocaleString()}\nmostly ${t.dominant}`;
     b.addEventListener('click', () => {
