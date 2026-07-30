@@ -263,7 +263,7 @@ def _session(
     """
     down = threading.Event()
     connected = threading.Event()
-    state = {"reason": None, "last_message": time.monotonic()}
+    state = {"reason": None}
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         connected.set()
@@ -293,7 +293,6 @@ def _session(
         down.set()
 
     def on_message(client, userdata, msg):
-        state["last_message"] = time.monotonic()
         body = sink.write(msg.topic, msg.payload)  # durable first
         if isinstance(body, dict):
             dbsink.write(body)  # enqueue only; never block this thread
@@ -334,22 +333,15 @@ def _session(
         if down.is_set():
             return False, state["reason"]
 
-        deadline = time.monotonic() + hold
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                print("[mqtt] token refresh due; cycling connection")
-                return True, None
-            if down.wait(timeout=min(60.0, remaining)):
-                return False, state["reason"]
-            # Watchdog for a broker that holds the socket open but stops
-            # publishing. Deliberately generous: a parked car is legitimately
-            # silent for many hours, so a short timer would churn all night for
-            # nothing. This only catches a genuinely wedged subscription.
-            silent = time.monotonic() - state["last_message"]
-            if silent > cfg.stall_timeout:
-                print(f"[mqtt] no messages for {silent / 3600:.1f}h; rebuilding")
-                return False, None
+        # No stall watchdog here on purpose. The id_token expires hourly, so
+        # this loop already tears the connection down and rebuilds it every ~55
+        # minutes; a wedged subscription cannot outlive that. An additional
+        # silence timer would either duplicate the token cycle or fire while the
+        # car is legitimately parked and silent, which is most of the time.
+        if down.wait(timeout=hold):
+            return False, state["reason"]
+        print("[mqtt] token refresh due; cycling connection")
+        return True, None
     finally:
         client.disconnect()
         client.loop_stop()

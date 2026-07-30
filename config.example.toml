@@ -3,10 +3,12 @@
 # From My BMW portal -> Personal Data -> My Vehicles -> CarData -> "Create Client ID"
 client_id = "00000000-0000-0000-0000-000000000000"
 
-# Vehicles to subscribe to. One MQTT connection, one subscription per VIN.
+# Your vehicles. Listed for `status` output only -- the subscription is a single
+# wildcard topic ({gcid}/+) covering every VIN on the account, so a car added in
+# the portal starts streaming without editing this.
 vins = [
-    "WBAXXXXXXXXXXXXXX",  # one entry per vehicle; used for status output only.
-    "WBYXXXXXXXXXXXXXX",  # the subscription itself is {gcid}/+ and covers all.
+    "WBAXXXXXXXXXXXXXX",
+    "WBYXXXXXXXXXXXXXX",
 ]
 
 # Optional cross-check against the GCID shown in the portal under
@@ -15,5 +17,16 @@ vins = [
 # disagrees, we abort rather than silently stream under the wrong identity.
 # gcid = ""
 
-# Where raw JSONL lands. Relative paths resolve against the project root.
+# Where raw JSONL, logs, the catalogue cache and the rendered map land.
+# Relative paths resolve against the project root.
 data_dir = "data"
+
+# Postgres. Local socket, no password.
+dsn = "postgresql:///bmwcardata"
+
+# Retention, applied by `bmwcd prune` (daily at 04:00 via the launchd agent).
+# The database holds this many days...
+retention_days = 30
+# ...and the raw JSONL keeps twice that by default, so the database can be
+# dropped and rebuilt with `bmwcd load` if the schema changes.
+# raw_retention_days = 60

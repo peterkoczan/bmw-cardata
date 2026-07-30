@@ -120,8 +120,18 @@ class TokenStore:
                 "If the refresh token has expired (~2 weeks), re-run: bmwcd auth"
             )
         body = resp.json()
-        # BMW does not always echo gcid on refresh; keep the one we have.
-        body.setdefault("gcid", tokens.gcid)
+        # Carry forward anything BMW omits. gcid is routinely absent on refresh;
+        # refresh_token is normally rotated but must never be *lost* -- saving a
+        # body without it writes a token file we cannot refresh from, which
+        # costs an interactive re-auth even though the old credential was still
+        # perfectly good.
+        for field in ("gcid", "refresh_token"):
+            body.setdefault(field, tokens.data.get(field))
+
+        missing = [f for f in ("id_token", "refresh_token", "gcid") if not body.get(f)]
+        if missing:
+            # Do not overwrite a working tokens.json with an unusable one.
+            raise AuthRetryable(f"refresh response missing {missing}; keeping old tokens")
         return self.save(body)
 
     def fresh(self) -> Tokens:

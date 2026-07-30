@@ -14,10 +14,6 @@ class Config:
         data_dir = Path(raw.get("data_dir", "data"))
         self.data_dir = data_dir if data_dir.is_absolute() else ROOT / data_dir
         self.dsn: str = raw.get("dsn", "postgresql:///bmwcardata")
-        # Rebuild the connection if the broker holds the socket open but stops
-        # publishing for this long. Generous by default: a parked car is
-        # genuinely silent for hours, and a short timer would churn all night.
-        self.stall_timeout: float = float(raw.get("stall_timeout_hours", 6)) * 3600
         self.retention_days: int = int(raw.get("retention_days", 30))
         # Raw JSONL is the rebuild path if the schema turns out wrong, so it
         # outlives the database by default.
