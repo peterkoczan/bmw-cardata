@@ -18,6 +18,10 @@ class Config:
         self.data_dir = data_dir if data_dir.is_absolute() else ROOT / data_dir
         self.dsn: str = raw.get("dsn", "postgresql:///bmwcardata")
         self.retention_days: int = int(raw.get("retention_days", 30))
+        # Logs are rotated on size, not age: the stream prints a line per
+        # message, so volume tracks how much you drive rather than the calendar.
+        self.log_max_mb: float = float(raw.get("log_max_mb", 10))
+        self.log_keep: int = int(raw.get("log_keep", 3))
         # Raw JSONL is the rebuild path if the schema turns out wrong, so it
         # outlives the database by default.
         self.raw_retention_days: int = int(

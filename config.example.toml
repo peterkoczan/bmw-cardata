@@ -30,3 +30,9 @@ retention_days = 30
 # ...and the raw JSONL keeps twice that by default, so the database can be
 # dropped and rebuilt with `bmwcd load` if the schema changes.
 # raw_retention_days = 60
+
+# Logs rotate on size rather than age, because they grow with how much you drive
+# rather than with the calendar. Checked by the running stream every 30s, and
+# again by the nightly prune in case it is not running.
+log_max_mb = 10
+log_keep = 3
