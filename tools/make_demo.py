@@ -70,6 +70,7 @@ for i in range(90):
             "intensity": round(intensity, 3),
             "km": 0.42,
             "step_m": 420,
+            "gap_s": 45 if i not in (0, BREAK_AT) else None,
             "trip": 0 if i < BREAK_AT else 1,
             "draw": i not in (0, BREAK_AT),
             **extra,
