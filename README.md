@@ -1,38 +1,44 @@
 # bmw-cardata
 
-Standalone subscriber for the BMW CarData streaming interface: MQTT → raw JSONL
-→ PostgreSQL, with a self-contained map page for replaying where the car went
-and what it was doing.
+I wanted my own copy of what my car reports. BMW's CarData gives you a live MQTT
+stream of telemetry, so this subscribes to it, writes everything to disk, puts it
+in Postgres, and draws a map I can scrub back through.
 
-## Requirements and compatibility
+It runs on my laptop as a background service with a menu bar icon that tells me
+whether it's actually working.
 
-**macOS only.** Not a portability oversight — the service supervision is
-`launchd`, the status indicator is a native menu bar app via `rumps`/PyObjC, and
-several actions shell out to `open` and `pbcopy`. The core (`auth`, `stream`,
-`db`, `export`) is plain Python and would run anywhere; the packaging around it
-is not. On Linux you would swap `launchd` for systemd and drop the menu bar.
+![Map preview](docs/screenshot.png)
+
+[Live demo](https://peterkoczan.github.io/bmw-cardata/demo.html) — made-up data,
+not my car.
+
+## What you need
+
+This is macOS-only, and not by accident. The service supervision is launchd, the
+menu bar app is native, and a few things shell out to `open` and `pbcopy`. The
+core of it (auth, the MQTT client, the database, the map export) is plain Python
+and would run anywhere. Everything around it wouldn't. On Linux you'd swap
+launchd for systemd and skip the menu bar.
 
 | | |
 |---|---|
-| OS | macOS 13+ (Apple Silicon or Intel) |
-| Python | **3.11+** — `tomllib` is stdlib from 3.11 |
-| Database | PostgreSQL 14+ (17 is what `install.sh` sets up, via Homebrew) |
-| Python packages | `paho-mqtt` ≥ 2.1, `requests`, `certifi`, `psycopg[binary]` ≥ 3.2, `rumps` (macOS only) |
-| Optional | Homebrew — only for installing PostgreSQL; Google Chrome — only for regenerating the README screenshot |
-| Network | Outbound TLS 1.3 to `customer.streaming-cardata.bmwgroup.com:9000` and `customer.bmwgroup.com:443` |
+| OS | macOS 13 or newer |
+| Python | 3.11+, because I use `tomllib` |
+| Database | PostgreSQL 14+ (the installer sets up 17 via Homebrew) |
+| Packages | paho-mqtt, requests, certifi, psycopg, rumps |
+| Network | outbound TLS 1.3 to `customer.streaming-cardata.bmwgroup.com:9000` |
 
-**Account requirements**, which no amount of code can work around:
+Things no code can fix:
 
-- BMW CarData streaming is **EU-only** at present.
-- An active My BMW account with the vehicle mapped, and you must be the
-  **primary user** of it — a secondary user cannot configure a stream.
-- The vehicle must be new enough to have ConnectedDrive telematics. What you get
-  depends on the instrument cluster: Live Cockpit Professional reports position
-  roughly every 3 minutes or 2 km while moving; Live Cockpit Plus only at trip
-  start and end. Older cars (an i3, say) report rarely and mostly when parked.
+- CarData streaming is EU-only right now.
+- You need a My BMW account with the car mapped to it, and you have to be the
+  **primary user**. A secondary user can't set up a stream.
+- How much you get depends on the car. Mine has Live Cockpit Professional and
+  reports its position every 3 minutes or so while driving. Live Cockpit Plus
+  only reports at the start and end of a trip. My i3 barely reports at all.
 
-Nothing here needs your BMW password. Authorisation is OAuth device-code: you
-sign in on BMW's own site and approve a code.
+You never give this your BMW password. You sign in on BMW's own site and approve
+a code.
 
 ## Install
 
@@ -40,155 +46,109 @@ sign in on BMW's own site and approve a code.
 curl -fsSL https://raw.githubusercontent.com/peterkoczan/bmw-cardata/main/install.sh | bash
 ```
 
-Clones to `~/Developer/bmw-cardata` (override with `BMWCD_DIR`), builds the
-venv, installs and starts PostgreSQL if it is missing (asking first), creates
-the database and schema, fetches BMW's key catalogue, and loads the launchd
-agents. Safe to re-run — it updates an existing clone rather than clobbering it,
-and leaves an existing `config.toml` alone.
+It clones to `~/Developer/bmw-cardata` (set `BMWCD_DIR` if you want it
+elsewhere), makes the venv, installs Postgres if you don't have it (it asks
+first), creates the database, fetches BMW's key catalogue and loads the launchd
+agents. You can run it again safely — it updates the clone and leaves your
+`config.toml` alone.
 
-Then click the **⚙️ menu bar icon → "Set up / re-authorise…"**. It lists the
-portal steps, takes the Client ID, opens BMW's sign-in with the code already on
-your clipboard, and starts streaming once approved.
+Then click the menu bar icon and pick **Set up / re-authorise…**. It tells you
+what to do in the BMW portal, takes your Client ID, and handles the sign-in.
 
-Prefer doing it by hand? The portal steps are below and the CLI equivalents are
-in [Use](#use).
+## Setting it up in the BMW portal
 
-## Portal prerequisites
+The menu bar app walks you through this, but here it is written down:
 
-1. My BMW → Personal Data → My Vehicles → CarData → **Create Client ID**.
-   Do *not* click "Authenticate Vehicle".
-2. **Subscribe the client ID to CarData Streaming** — this allocates the
-   `cardata:streaming:read` scope. Must happen before running `auth`, otherwise
-   the token comes back scopeless and MQTT rejects it with nothing useful in
-   the error. `auth` checks for this and fails loudly.
-3. **Change data selection** → enable the telematic keys you want. Nothing
-   streams for keys that aren't selected.
+1. Sign in to My BMW, go to your vehicle overview, open **BMW CarData** under
+   your car, accept the terms. Note that accepting also signs you up to whatever
+   they change in the next six weeks.
+2. **Create CarData client**, copy the Client ID.
+3. Turn on **both** toggles: API access and CarData stream. If you skip the
+   stream one, sign-in still works and then MQTT rejects you with nothing useful
+   in the error. That one cost me a while.
+4. **Configure data stream**, tick what you want, submit. You do this per car.
+5. Don't click **Authenticate device**. This app does that part itself.
 
-## Use
+## Using it
 
 ```
-.venv/bin/python -m bmwcd auth       # device-code flow, one-off
+.venv/bin/python -m bmwcd auth       # sign in (or use the menu bar)
 .venv/bin/python -m bmwcd initdb     # create the schema
 .venv/bin/python -m bmwcd catalogue  # fetch BMW's key metadata
-.venv/bin/python -m bmwcd status     # token state and row counts
-.venv/bin/python -m bmwcd stream     # subscribe -> data/raw/ + Postgres
-.venv/bin/python -m bmwcd export     # render data/viz/map.html
+.venv/bin/python -m bmwcd status     # what's happening
+.venv/bin/python -m bmwcd stream     # subscribe
+.venv/bin/python -m bmwcd export     # build the map
+.venv/bin/python -m bmwcd load       # rebuild the DB from the raw files
+.venv/bin/python -m bmwcd prune      # apply retention
 ```
 
-Only one `stream` may run at a time — a `flock` on `data/stream.lock` enforces
-it. BMW allows one connection per GCID, so a second process does not duplicate
-work, it evicts the first in a loop and neither stays connected.
+Only one `stream` can run at once — there's a lock file. BMW allows one
+connection per account, so two of them just kick each other off in a loop.
 
-During `auth`, finish the BMW login in the browser completely before touching
-the terminal — interrupting the flow wedges the device code and it has to be
-restarted.
-
-## Running as a service
+## Running it in the background
 
 ```
-./launchd/install.sh
+./launchd/install.sh            # all three agents
+./launchd/install.sh menubar    # just one
 ```
 
-Installs three user LaunchAgents (idempotent — re-run after editing a plist):
+Three agents: the stream itself (restarts if it dies), a nightly prune at 04:00,
+and the menu bar app. Logs go to `data/logs/`. If a plist hasn't changed the
+script leaves that agent running rather than bouncing it, because restarting the
+stream for no reason costs you data.
 
-- `nl.koczan.bmw-cardata.stream` — `RunAtLoad` + `KeepAlive`, so it starts at
-  login and restarts on any exit. `ThrottleInterval` 30s stops a crash-loop
-  hammering BMW when the refresh token has expired and needs `bmwcd auth` by hand.
-- `nl.koczan.bmw-cardata.prune` — daily at 04:00.
-- `nl.koczan.bmw-cardata.menubar` — the status indicator (below).
+### The menu bar
 
-Logs land in `data/logs/`. Check state with `launchctl list | grep bmw-cardata`.
+| Icon | What it means |
+|---|---|
+| green | streaming, and the car said something recently |
+| yellow | streaming, but nothing for 6+ hours — usually just parked |
+| orange | streaming, but the database is unreachable |
+| red | not streaming |
+| grey | not set up yet, or I can't tell |
+
+The important bit: green means *actually connected*, not just "the process is
+alive". The stream writes a heartbeat and the icon reads it. Without that a
+crashed reconnect loop looks identical to a car sitting in a car park, which is
+the one thing I wanted to be able to tell apart.
+
+The menu has the setup flow, a retention setting, start/stop/restart, and
+**Open map**, which rebuilds from whatever is in the database right now and opens
+it. Stopping from here actually stops it rather than having launchd bring it
+straight back.
 
 ### Sleep
 
-Closing the lid loses data — the feed is forward-only and nothing buffers it —
-but the service resumes on its own without intervention.
+If I close the lid I lose whatever the car sent while it was shut. That's fine,
+I'm not going to leave it open all night. What matters is that it picks itself
+back up, and it does.
 
-That needed a specific fix. The session wait was driven by `time.monotonic()`,
-which macOS **stops while the machine is asleep**, whereas the `id_token`
-expires on wall-clock time. A single monotonic wait would therefore return from
-a two-hour sleep still believing it had 50 minutes left on a token that died an
-hour earlier, sitting on a socket the network dropped long before. The wait is
-now sliced and compared against `time.time()`, so a resume is noticed within 30
-seconds and cycles straight into a refresh and reconnect.
+That needed a fix, though. macOS stops the monotonic clock while asleep, but the
+token expires on real time. So the wait would come back from a two hour sleep
+thinking it still had 50 minutes left on a token that died an hour ago, sitting
+on a dead socket. It now watches both clocks and notices a resume within 30
+seconds.
 
-For genuinely continuous capture the service belongs on an always-on host — at
-which point remember BMW allows only one stream connection per GCID, so it moves
-rather than being duplicated.
-
-### Menu bar
-
-```
-python -m bmwcd menubar     # or let the launchd agent run it
-```
-
-A status glyph with the details behind it:
-
-| Glyph | Meaning |
-|---|---|
-| 🟢 | Streaming, database up, heard from the car recently |
-| 🟡 | Up, but nothing from the car for over 6 hours — usually just parked |
-| 🟠 | Streaming, but the database is unreachable |
-| 🔴 | Subscriber not running |
-
-⚙️ means not yet set up or not yet authorised.
-
-The menu shows the stream PID, database reachability, how long since the last
-message, and row/key counts. Actions:
-
-- **Set up / re-authorise…** — the portal instructions, the Client ID prompt,
-  and the whole OAuth device-code dance. Also how you re-authorise after the
-  refresh token lapses (~2 weeks idle).
-- **Open map** — rebuilds from whatever is in the database right now, then opens
-  it in your browser. Always current, never a stale file.
-- **Retention…** — change how many days the database keeps, written back to
-  `config.toml`, with the option to apply it immediately instead of waiting for
-  the nightly prune.
-- **Restart / Stop / Start** the stream, and **Open log**.
-
-Control goes through `launchctl` rather than signalling the process directly, so
-the supervisor's own view of the job stays correct — stopping from here means
-stopped, not restarted three seconds later by `KeepAlive`. "Quit indicator"
-boots out its own agent for the same reason, otherwise quitting would achieve
-nothing.
-
-The indicator tolerates having no config at all — it is installed before setup
-has been run, and crashing on a missing `config.toml` would crash-loop under
-`KeepAlive`.
+If you want no gaps at all, this belongs on something that's always on. Just
+remember it has to *move* there, not run in both places.
 
 ## Storage
 
-PostgreSQL (`brew install postgresql@17`), plain — no Timescale. At a parked
-car's message rate the hypertable machinery earns nothing, and retention is one
-scheduled `DELETE`. Add Timescale later if volume ever justifies it; the schema
-does not change.
+Plain PostgreSQL. No Timescale — at the rate a parked car produces data the
+hypertable machinery buys nothing, and retention is one scheduled `DELETE`.
 
-`telemetry` is one row per `(vin, key, ts)`. Values land in a typed column —
-`num`, `bool` or `txt` — because keys genuinely differ in type (of the first 277
-messages: 99 int, 95 str, 74 bool, 9 float). That heterogeneity is why this is
-not InfluxDB: Influx pins a field's type on first write and rejects the rest.
+`telemetry` is one row per (car, key, timestamp), with the value in a typed
+column: `num`, `bool` or `txt`. Keys genuinely differ in type, which is also why
+this isn't InfluxDB — Influx fixes a field's type on first write and then rejects
+everything that disagrees.
 
-The primary key dedupes at write time. BMW re-sends identical readings — the
-first capture had 277 messages carrying 168 distinct rows.
+The primary key deduplicates as it writes. BMW re-sends a lot: my first capture
+was 277 messages carrying 168 actual rows.
 
-```
-python -m bmwcd initdb   # idempotent
-python -m bmwcd load     # backfill from raw JSONL, idempotent
-python -m bmwcd prune    # apply retention_days + raw_retention_days
-```
+Two views: `location` pairs latitude and longitude into points (they arrive as
+separate messages), and `latest` is the most recent value per key.
 
-Alongside `telemetry` sits `catalogue` (see below) and two views:
-
-- `location` — latitude, longitude, altitude, heading, satellites and fix status
-  as points. The two coordinates arrive as *separate messages*; they have shared
-  an identical measurement timestamp in every fix seen so far, but the view
-  pairs each latitude with the nearest longitude within 5 seconds rather than
-  requiring an exact match, so a near-miss degrades to a slightly-off pairing
-  instead of a discarded position. It also drops `NO_FIX`, near-zero
-  coordinates, and out-of-range values.
-- `latest` — most recent value per key, for a dashboard header.
-
-Replay for a time slider is a plain range scan:
+Scrubbing back through time is just a range scan:
 
 ```sql
 SELECT ts, lat, lon FROM location
@@ -196,191 +156,109 @@ WHERE vin = $1 AND ts BETWEEN $2 AND $3
 ORDER BY ts;
 ```
 
-State as of an instant:
+The raw JSONL is the real source of truth and it outlives the database, so I can
+drop Postgres and rebuild it with `load` whenever I change my mind about the
+schema.
 
-```sql
-SELECT DISTINCT ON (key) key, ts, num, bool, txt, unit
-FROM telemetry WHERE vin = $1 AND ts <= $2
-ORDER BY key, ts DESC;
-```
-
-Raw JSONL stays the source of truth and outlives the database (`raw_retention_days`,
-default 2x), so the DB can be dropped and rebuilt with `load` if the schema changes.
-
-## Map
-
-[![Map preview](docs/screenshot.png)](https://peterkoczan.github.io/bmw-cardata/demo.html)
-
-*Click for the [live demo](https://peterkoczan.github.io/bmw-cardata/demo.html) — invented data, no real vehicle or location.*
+## The map
 
 ```
-python -m bmwcd export [--days N]
+.venv/bin/python -m bmwcd export [--days N]
 open data/viz/map.html
 ```
 
-Regenerate the published preview after changing the template:
+Everything is embedded in the HTML, so it works straight off disk without a web
+server. There's a time slider that moves the car to where it was, and hovering
+the route shows what was happening at that point.
 
-```
-python tools/make_demo.py && tools/screenshot.sh
-```
+The route is coloured by what was driving the car: blue for electric, red for
+petrol, green when it was recovering energy, darker for heavier use.
 
-Leaflet page with all data embedded inline, so it works from `file://` without a
-server — a browser will not `fetch()` a sibling JSON file off disk. Time slider
-scrubs the vehicle to where it was at that instant and dims the route ahead of it.
+**That colour is worked out, not measured.** CarData has no instantaneous power
+or fuel-flow reading anywhere in its catalogue — everything is a lifetime total,
+a per-trip total, or an average. So I take engine state to decide petrol vs
+electric, and work out the shade from how much charge or fuel disappeared over
+the distance between two fixes. It's an estimate across a segment, not a reading
+at a point.
 
-Route colour encodes drivetrain mode: blue electric, red petrol, green
-recuperating, with shade by intensity. Tracing the route with the cursor shows a
-readout of that moment — speed, consumption, charge, fuel, odometer, heading,
-altitude and fix quality. Below the map, a state panel shows every recorded key
-as it stood at the slider's position.
+There's also no speed. BMW deliberately doesn't send it: "due to privacy reasons
+some functions are not allowed to transmit the current driving speed". You get a
+range like 50–60 km/h, so that's what the readout shows.
 
-**There is no exact speed in CarData.** BMW withholds it deliberately: "due to
-privacy reasons some functions are not allowed to transmit the current driving
-speed". The only speed signal is `vehicle.vehicle.speedRange.lowerBound` /
-`.upperBound`, so the readout shows a band rather than a number.
+### Trips
 
-**Mode is derived, not measured.** CarData exposes no instantaneous power or
-fuel-flow signal anywhere in the catalogue — every consumption key is a lifetime
-total, a per-trip accumulator or a running average. `avgAuxPower` looks like the
-exception but covers auxiliary load only, not traction. So mode comes from engine
-state, and shade from differencing state of charge or fuel level over the
-distance between consecutive fixes. It is an estimate over a segment, not a
-reading at a point.
-
-Keys that matter, all confirmed streamable:
-
-| Purpose | Key |
-|---|---|
-| State of charge | `vehicle.drivetrain.batteryManagement.header` |
-| Battery capacity | `vehicle.drivetrain.batteryManagement.maxEnergy` |
-| Engine running | `vehicle.drivetrain.engine.isIgnitionOn` / `.isActive` |
-| Fuel | `vehicle.drivetrain.fuelSystem.level` (%), `.remainingFuel` (l) |
-| Charging state | `vehicle.drivetrain.electricEngine.charging.hvStatus` |
-
-Two traps in that list. BMW's catalogue has the *human-readable names* of the two
-engine keys crossed over relative to their key names, so both are consulted and
-either one reporting "running" wins. And `electricEngine.charging.level` looks
-like SoC but is the *predicted* value and is not streamable at all.
-
-Position updates depend on the instrument cluster, not the API: Live Cockpit
-Professional emits roughly every 3 minutes or 2 km while moving, Live Cockpit
-Plus only at trip start and end. Expect a coarse polyline either way. Fixes
-reporting `NO_FIX`, null island, or out-of-range coordinates are dropped by the
-`location` view.
-
-### Trips, not one long line
-
-Nothing is transmitted while parked, so a day's fixes are several separate
-drives. Joining them all would draw roads that were never travelled and invent
-a consumption figure for distance nobody covered. Consecutive fixes are only
+Nothing is sent while the car is parked, so a day of fixes is several separate
+drives rather than one route. Joining them all up would draw roads I never drove
+and invent fuel consumption for distance I never covered. So fixes only get
 connected when they look like continuous movement:
 
-| Rule | Threshold | Why |
-|---|---|---|
-| Gap ends a trip | 10 min | Longer silence means parked, not driving |
-| Below this, no movement | 10 m | Parked jitter, and BMW's repeated bursts |
-| Above this, no segment | 2 km | A tunnel catch-up, not a drive |
+| Rule | Threshold |
+|---|---|
+| gap ends a trip | 10 minutes |
+| below this it hasn't moved | 10 m |
+| above this it's a tunnel, not a drive | 2 km |
 
-Trips are listed under the map; clicking one zooms to it and scrubs the panel
-to how it finished.
+Trips are listed under the map, click one to zoom to it.
 
-Odometer deltas are sanity-checked too — BMW has been known to report a km
-value labelled as miles — and fall back to GPS distance when implausible.
-
-State-panel labels and groupings come from the catalogue, so tiles read
-"Charging status of high-voltage battery" rather than a name derived from the
-key path. That label is also how we know `batteryManagement.header` really is
-state of charge.
-
-## Catalogue
+## The catalogue
 
 ```
-python -m bmwcd catalogue
+.venv/bin/python -m bmwcd catalogue
 ```
 
-BMW publishes the telematic data catalogue at a **public, unauthenticated**
-endpoint — no CarData credentials involved. 294 keys, 245 of them streamable
-(exactly the set the portal offers). Each carries a display name, unit,
-datatype, value range and category, cached to `data/catalogue.json` and loaded
-into the `catalogue` table for joining against `telemetry`.
+BMW publishes their whole telematic catalogue at a public endpoint that needs no
+authentication at all. 294 keys, 245 of them streamable, which is exactly what
+the portal offers you. Each one has a proper display name, unit, datatype and
+category.
 
-It earns its place by typing values from BMW's metadata rather than from
-whatever arrived first:
+It's worth having because it types the values properly instead of guessing from
+whatever turned up first:
 
-- **Numbers sometimes arrive quoted.** `batterySizeMax` came through as the
-  string `"0.0"`. Typing on the Python type alone buried it in `txt`, invisible
-  to every numeric query. Now `num` is populated too, with the raw text kept.
-- **Many "boolean" keys ship bespoke vocabularies** — `OPEN/CLOSED`,
-  `FLAP_UNLOCKED/FLAP_LOCKED`, `NOTCHOSEN/CHOSEN`. The mapping is derived from
-  each key's own predicate (`isOpen` → `OPEN` is true), *not* from position in
-  the range string: `isOpen` ships as both `CLOSED, OPEN, INVALID` and
-  `OPEN, CLOSED, INVALID, UNKNOWN`, so positional derivation inverts half of
-  them. Where polarity can't be established the value stays text — an unmapped
-  value is still queryable, a wrong one is a lie.
-- Keys with three or more real states (`isPermanentlyUnlocked` →
-  `NO_ACTION, FLAP_UNLOCKED, FLAP_LOCKED`) are deliberately left alone.
+- Numbers sometimes arrive quoted. `batterySizeMax` came through as the string
+  `"0.0"` and went into the text column where no numeric query would ever find
+  it.
+- Plenty of "boolean" keys don't use true/false. They use `OPEN`/`CLOSED`,
+  `FLAP_UNLOCKED`/`FLAP_LOCKED`, `NOTCHOSEN`/`CHOSEN`. I work out which way round
+  from the key's own name (`isOpen` means `OPEN` is true), *not* from the order
+  they're listed in — `isOpen` ships both as `CLOSED, OPEN, INVALID` and as
+  `OPEN, CLOSED, INVALID, UNKNOWN`, so going by position gets half of them
+  backwards. If it can't be worked out for certain, the value stays as text.
+  Unmapped is still queryable, wrong is a lie.
 
-## Reliability
-
-The feed is forward-only, so every failure mode below costs data permanently.
-
-- **Reconnect backs off** 5s doubling to 5 min, then 10 min after ten
-  consecutive failures, seeded from the MQTT reason code — quota-exceeded waits
-  60s, because reconnecting hard against a quota error is how you stay
-  quota-exceeded.
-- **A failed token refresh no longer kills the process.** `invalid_grant` is
-  fatal and asks for `bmwcd auth`; network errors and 5xx back off and retry.
-- **Connect has a timeout.** A wedged TLS handshake never fires a callback, so
-  a blocking connect can hang forever with nothing to notice.
-- **Database writes happen on their own thread** behind a bounded queue.
-  Writing inline on paho's network thread meant a slow Postgres delayed PINGREQ
-  past the 30s keep-alive and got us disconnected — a database problem becoming
-  a data-loss problem. On overflow, messages are dropped and counted: the JSONL
-  still has them and `bmwcd load` repairs the gap.
-- **Tokens are written atomically, and never incompletely.** BMW rotates the
-  refresh token on every refresh, so truncating in place risked destroying the
-  only copy of a two-week credential. A refresh response that omits
-  `refresh_token`, `id_token` or `gcid` is also refused rather than saved —
-  writing a partial file would discard a credential that was still valid.
-- **One `stream` at a time**, enforced by a `flock`. Two processes evict each
-  other under BMW's one-connection-per-GCID rule and neither survives.
-
-There is deliberately **no stall watchdog**. The `id_token` expires hourly, so
-the loop already tears the connection down and rebuilds it every ~55 minutes; a
-wedged subscription cannot outlive that. A separate silence timer would either
-duplicate the token cycle or fire while the car is legitimately parked, which is
-most of the time.
+It's also how I know `batteryManagement.header` is state of charge — BMW's own
+name for it is "Charging status of high-voltage battery".
 
 ## Remote control
 
-There is none. Every CarData endpoint is a `GET` except `POST`/`DELETE` on
-`/customers/containers`, which manages data selection rather than the car. No
-location refresh, no remote functions. Those live on the separate, unofficial
-MyBMW API that `bimmer_connected` speaks.
+There isn't any. Every CarData endpoint is a `GET` except the ones that manage
+which data you've selected. No location refresh, no remote functions. Those live
+on the separate unofficial MyBMW API that `bimmer_connected` talks to.
 
-## Facts worth not relearning
+## Things that took me a while
 
-- MQTT **v5.0**, TLS, port 9000, keep-alive ≤ 30s.
-- Topic: **`{gcid}/+`**. The `id_token` carries the broker ACL in its
-  `dynamic_scopes` claim as `read:streaming/*/{gcid}.*`, so a topic must begin
-  with the GCID. The portal's connection panel shows the bare VIN as "Thema" —
-  that is only the second component, and subscribing to it returns 0x87 Not
-  authorized. BMW then drops the **entire connection**, so one speculative
-  topic kills the working ones. Never probe topics on the live subscriber.
-- Username is the GCID, password is the **`id_token`** (not the access token).
-- `id_token` expires hourly → the stream loop tears down and rebuilds the
-  connection each cycle rather than swapping credentials in place.
-- Refresh token lasts ~2 weeks. Longer downtime than that means re-running `auth`.
-- **One stream connection per GCID.** If Home Assistant should also get this
-  data, this service has to republish to a local broker; HA cannot connect to
-  BMW in parallel.
-- The stream is forward-only. Location history accumulates here and cannot be
-  backfilled from it — use the portal's Customer Archive export or the REST
-  charging-history endpoint (rate limited to 50 req/24h).
-- The i3 reports infrequently (typically parked/off or at 100% charge). Long
-  silences are the vehicle, not the client.
+- MQTT v5, TLS, port 9000, keepalive 30 seconds or less.
+- The topic is `{gcid}/+`. The portal shows the bare VIN as the "topic" but
+  that's only half of it — your `id_token` carries the broker's access rule as a
+  regex requiring the topic to start with your account ID. Subscribe to the bare
+  VIN and you get "not authorized", and BMW then drops the **whole** connection,
+  taking your working subscriptions with it. Don't test topics on a live
+  subscriber.
+- Username is the account ID, password is the **`id_token`**, not the access
+  token.
+- The `id_token` dies every hour, so the connection is rebuilt each time rather
+  than swapping credentials underneath it.
+- The refresh token lasts about two weeks. Longer than that off and you sign in
+  again.
+- One connection per account. If you want Home Assistant to have this too, this
+  service has to republish it locally — HA can't connect to BMW alongside it.
+- It's forward-only. Location history builds up here and can't be backfilled.
+  For older data there's the Customer Archive export, or the REST charging
+  history endpoint, which is limited to 50 requests a day.
+- Long silences from the i3 are the car, not a bug.
 
 ## Sources
 
-Endpoints confirmed against `whi-tw/bmw-cardata-streaming-poc` AUTHENTICATION.md
-and `https://bmw-cardata.bmwgroup.com/customer/public/assets/swagger/swagger-customer-api-v1.json`.
+Endpoints confirmed against
+[whi-tw/bmw-cardata-streaming-poc](https://github.com/whi-tw/bmw-cardata-streaming-poc)
+and BMW's own
+[customer API swagger](https://bmw-cardata.bmwgroup.com/customer/public/assets/swagger/swagger-customer-api-v1.json).
