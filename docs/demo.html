@@ -162,15 +162,21 @@ function stateAt(v, key, t) {
   return hit ? { value: hit[1], unit: s.u } : null;
 }
 
-function speedAt(v, t) {
-  // BMW does not transmit exact speed -- privacy restriction. The catalogue
-  // offers only a bucketed range, so report the band or say nothing was sent.
+function speedAt(v, pt, t) {
+  // BMW does not transmit exact speed -- privacy restriction -- and on this car
+  // even the bucketed range has never arrived. Prefer BMW's band when it exists,
+  // otherwise fall back to what the positions themselves imply.
   const lo = stateAt(v, 'vehicle.vehicle.speedRange.lowerBound', t);
   const hi = stateAt(v, 'vehicle.vehicle.speedRange.upperBound', t);
-  if (!lo && !hi) return 'not reported';
   if (lo && hi) return `${lo.value}–${hi.value} km/h`;
-  const one = lo || hi;
-  return `${one.value} km/h${lo ? '+' : ' or less'}`;
+  if (lo || hi) { const one = lo || hi; return `${one.value} km/h${lo ? '+' : ' or less'}`; }
+
+  if (pt.speed_kmh != null) {
+    // A floor, not a reading: the car drove at least the straight line, so its
+    // average can only have been higher. Say so rather than implying precision.
+    return `≥${pt.speed_kmh} km/h${pt.speed_rough ? ' (rough)' : ''}`;
+  }
+  return 'not reported';
 }
 
 function consumptionOf(pt) {
@@ -188,7 +194,7 @@ function showHover(v, pt, e) {
   const rows = [];
   const push = (label, value) => { if (value != null && value !== '') rows.push([label, value]); };
 
-  push('Speed', speedAt(v, t));
+  push('Speed', speedAt(v, pt, t));
   push('Consumption', consumptionOf(pt));
 
   const soc = stateAt(v, 'vehicle.drivetrain.batteryManagement.header', t);
@@ -463,6 +469,7 @@ function buildTrips(v) {
     const b = document.createElement('button');
     const when = new Date(t.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
+    if (t.avg_kmh != null) b.textContent += ` · ${t.avg_kmh} km/h incl. stops`;
     if (t.kwh_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.kwh_per_100km} kWh/100km`;
     if (t.l_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.l_per_100km} l/100km`;
     b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
