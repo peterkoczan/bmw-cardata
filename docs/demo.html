@@ -210,6 +210,16 @@ const fmt = (value, unit, key = '') => {
   return '—';
 };
 
+/* ---------- dates ---------- */
+// YYYY/MM/DD throughout, rather than whatever the browser locale decides.
+// Sortable, unambiguous, and the same on every machine that opens the page.
+const pad = n => String(n).padStart(2, '0');
+const fmtDate = d =>
+  `${d.getFullYear()}/${pad(d.getMonth() + 1)}/${pad(d.getDate())}`;
+const fmtDateTime = d =>
+  `${fmtDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+const fmtTime = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+
 /* ---------- hover readout ---------- */
 const hoverEl = document.getElementById('hover');
 
@@ -279,7 +289,7 @@ function showHover(v, pt, e) {
   hoverEl.replaceChildren();
   const when = document.createElement('div');
   when.className = 'h';
-  when.textContent = new Date(t).toLocaleString();
+  when.textContent = fmtDateTime(new Date(t));
   const mode = document.createElement('div');
   mode.className = 'h';
   const swatch = document.createElement('span');
@@ -456,7 +466,7 @@ function paintPanel(v, t) {
 /* ---------- apply ---------- */
 function apply(idx) {
   const t = allTimes[idx] ?? allTimes[allTimes.length - 1];
-  clock.textContent = t ? new Date(t).toLocaleString() : '—';
+  clock.textContent = t ? fmtDateTime(new Date(t)) : '—';
   for (const { v, marker } of layers) {
     const p = lastAtOrBefore(v.points, t);
     if (p) { marker.setLatLng([p.lat, p.lon]); marker.setOpacity(1); }
@@ -527,13 +537,13 @@ function buildTrips(v) {
 
   for (const t of trips) {
     const b = document.createElement('button');
-    const when = new Date(t.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const when = fmtTime(new Date(t.start));
     b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
     if (t.avg_kmh != null) b.textContent += ` · ${t.avg_kmh} km/h incl. stops`;
     if (t.kwh_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.kwh_per_100km} kWh/100km`;
     if (t.l_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.l_per_100km} l/100km`;
     b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
-    b.title = `${new Date(t.start).toLocaleString()} → ${new Date(t.end).toLocaleString()}\nmostly ${t.dominant}`;
+    b.title = `${fmtDateTime(new Date(t.start))} → ${fmtDateTime(new Date(t.end))}\nmostly ${t.dominant}`;
     b.addEventListener('click', () => {
       const pts = v.points.filter(p => p.trip === t.trip).map(p => [p.lat, p.lon]);
       if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.2));
@@ -548,7 +558,7 @@ function buildTrips(v) {
 
 const notes = (DATA?.notes || []).slice();
 if (!vehicles.length) notes.unshift('No telemetry recorded yet.');
-notes.push(`generated ${DATA?.generated ?? '—'}`);
+notes.push(`generated ${DATA?.generated ? fmtDateTime(new Date(DATA.generated)) : '—'}`);
 document.getElementById('notes').textContent = notes.join('  ·  ');
 
 buildPanel(current);
