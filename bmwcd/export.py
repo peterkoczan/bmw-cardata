@@ -378,6 +378,10 @@ def build(cfg: Config, days: int | None = None) -> dict:
                     step_m = haversine_m(prev["lat"], prev["lon"], lat, lon)
                     gap_s = (point["t"] - prev["t"]) / 1000.0
                     point["step_m"] = round(step_m)
+                    # Surfaced in the readout: BMW's cadence is uneven enough
+                    # that "is this a straight road or a hole in the feed?" is
+                    # the first question any long line raises.
+                    point["gap_s"] = round(gap_s)
 
                     if gap_s > GAP_SPLIT_SECONDS or step_m > MAX_STEP_M:
                         # A feed gap or a post-tunnel jump. Drawing across it
