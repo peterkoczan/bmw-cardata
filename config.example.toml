@@ -1,0 +1,19 @@
+# Copy to config.toml and fill in. config.toml is gitignored.
+
+# From My BMW portal -> Personal Data -> My Vehicles -> CarData -> "Create Client ID"
+client_id = "00000000-0000-0000-0000-000000000000"
+
+# Vehicles to subscribe to. One MQTT connection, one subscription per VIN.
+vins = [
+    "WBAXXXXXXXXXXXXXX",  # one entry per vehicle; used for status output only.
+    "WBYXXXXXXXXXXXXXX",  # the subscription itself is {gcid}/+ and covers all.
+]
+
+# Optional cross-check against the GCID shown in the portal under
+# CARDATA STREAM -> Show Connection Details -> USERNAME.
+# The token response carries the authoritative value; if this is set and
+# disagrees, we abort rather than silently stream under the wrong identity.
+# gcid = ""
+
+# Where raw JSONL lands. Relative paths resolve against the project root.
+data_dir = "data"
