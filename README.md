@@ -160,6 +160,58 @@ Plus only at trip start and end. Expect a coarse polyline either way. Fixes
 reporting `NO_FIX`, null island, or out-of-range coordinates are dropped by the
 `location` view.
 
+## Catalogue
+
+```
+python -m bmwcd catalogue
+```
+
+BMW publishes the telematic data catalogue at a **public, unauthenticated**
+endpoint — no CarData credentials involved. 294 keys, 245 of them streamable
+(exactly the set the portal offers). Each carries a display name, unit,
+datatype, value range and category, cached to `data/catalogue.json` and loaded
+into the `catalogue` table for joining against `telemetry`.
+
+It earns its place by typing values from BMW's metadata rather than from
+whatever arrived first:
+
+- **Numbers sometimes arrive quoted.** `batterySizeMax` came through as the
+  string `"0.0"`. Typing on the Python type alone buried it in `txt`, invisible
+  to every numeric query. Now `num` is populated too, with the raw text kept.
+- **Many "boolean" keys ship bespoke vocabularies** — `OPEN/CLOSED`,
+  `FLAP_UNLOCKED/FLAP_LOCKED`, `NOTCHOSEN/CHOSEN`. The mapping is derived from
+  each key's own predicate (`isOpen` → `OPEN` is true), *not* from position in
+  the range string: `isOpen` ships as both `CLOSED, OPEN, INVALID` and
+  `OPEN, CLOSED, INVALID, UNKNOWN`, so positional derivation inverts half of
+  them. Where polarity can't be established the value stays text — an unmapped
+  value is still queryable, a wrong one is a lie.
+- Keys with three or more real states (`isPermanentlyUnlocked` →
+  `NO_ACTION, FLAP_UNLOCKED, FLAP_LOCKED`) are deliberately left alone.
+
+## Reliability
+
+The feed is forward-only, so every failure mode below costs data permanently.
+
+- **Reconnect backs off** 5s doubling to 5 min, then 10 min after ten
+  consecutive failures, seeded from the MQTT reason code — quota-exceeded waits
+  60s, because reconnecting hard against a quota error is how you stay
+  quota-exceeded.
+- **A failed token refresh no longer kills the process.** `invalid_grant` is
+  fatal and asks for `bmwcd auth`; network errors and 5xx back off and retry.
+- **Connect has a timeout.** A wedged TLS handshake never fires a callback, so
+  a blocking connect can hang forever with nothing to notice.
+- **Database writes happen on their own thread** behind a bounded queue.
+  Writing inline on paho's network thread meant a slow Postgres delayed PINGREQ
+  past the 30s keep-alive and got us disconnected — a database problem becoming
+  a data-loss problem. On overflow, messages are dropped and counted: the JSONL
+  still has them and `bmwcd load` repairs the gap.
+- **Tokens are written atomically.** BMW rotates the refresh token on every
+  refresh; truncating in place meant a crash mid-write destroyed the only copy
+  of a two-week credential.
+- **A stall watchdog** rebuilds the connection if the broker holds the socket
+  open but stops publishing. Default 6 hours, configurable — a parked car is
+  legitimately silent for hours, so a short timer would churn all night.
+
 ## Remote control
 
 There is none. Every CarData endpoint is a `GET` except `POST`/`DELETE` on

@@ -30,6 +30,21 @@ CREATE INDEX IF NOT EXISTS telemetry_ts ON telemetry (ts);
 -- Latitude and longitude arrive as separate messages but share an identical
 -- measurement timestamp, so a plain group-by pairs them exactly -- no
 -- interpolation, no time-bucket fudging. Confirmed against the first capture.
+-- BMW's own telematic data catalogue: display names, units, datatypes, value
+-- ranges and categories. Public, unauthenticated, refreshed with
+-- `bmwcd catalogue`. Joining against it beats inventing our own taxonomy.
+CREATE TABLE IF NOT EXISTS catalogue (
+    key           text PRIMARY KEY,
+    name          text,
+    description   text,
+    unit          text,
+    datatype      text,
+    value_range   text,
+    category      text,
+    streamable    boolean,
+    vehicle_types text[]
+);
+
 DROP VIEW IF EXISTS location;
 CREATE VIEW location AS
 WITH fix AS (
