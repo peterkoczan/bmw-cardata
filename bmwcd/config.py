@@ -22,6 +22,13 @@ class Config:
         )
 
 
+EXAMPLE_PATH = ROOT / "config.example.toml"
+
+
+def exists() -> bool:
+    return CONFIG_PATH.exists()
+
+
 def load() -> Config:
     if not CONFIG_PATH.exists():
         raise SystemExit(
@@ -29,3 +36,35 @@ def load() -> Config:
         )
     with CONFIG_PATH.open("rb") as fh:
         return Config(tomllib.load(fh))
+
+
+def ensure() -> Path:
+    """Create config.toml from the example if it is missing."""
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(EXAMPLE_PATH.read_text())
+    return CONFIG_PATH
+
+
+def set_value(key: str, value) -> None:
+    """Set a top-level scalar in config.toml, in place.
+
+    Edited as text rather than round-tripped through a TOML writer: the file is
+    mostly comments explaining each setting, and every serialiser would discard
+    them. Only simple top-level scalars are supported, which is all the GUI sets.
+    """
+    ensure()
+    rendered = f'"{value}"' if isinstance(value, str) else str(value)
+    lines = CONFIG_PATH.read_text().splitlines()
+    out, replaced = [], False
+    for line in lines:
+        stripped = line.lstrip()
+        # Also match a commented-out default so setting it uncomments the line.
+        bare = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+        if not replaced and bare.split("=")[0].strip() == key:
+            out.append(f"{key} = {rendered}")
+            replaced = True
+        else:
+            out.append(line)
+    if not replaced:
+        out.append(f"{key} = {rendered}")
+    CONFIG_PATH.write_text("\n".join(out) + "\n")

@@ -144,8 +144,12 @@ class TokenStore:
         return tokens
 
 
-def device_flow(store: TokenStore) -> Tokens:
-    """Interactive device-code authorisation. Blocks until the user approves."""
+def request_device_code(store: TokenStore) -> tuple[dict, str]:
+    """Ask BMW for a device code. Fast; safe to call on a UI thread.
+
+    Split out from the polling half so a GUI can show the code immediately and
+    poll in the background, rather than blocking for up to five minutes.
+    """
     verifier = _b64url(os.urandom(32))
     challenge = _b64url(hashlib.sha256(verifier.encode()).digest())
 
@@ -165,20 +169,18 @@ def device_flow(store: TokenStore) -> Tokens:
         timeout=30,
     )
     resp.raise_for_status()
-    auth = resp.json()
+    return resp.json(), verifier
 
+
+def verification_uri(auth: dict) -> str:
     # BMW returns verification_uri + a separate user_code; the RFC-8628
     # convenience form (verification_uri_complete) is not offered, so the code
     # has to be typed in by hand.
-    uri = auth.get("verification_uri_complete") or auth["verification_uri"]
-    print()
-    print("  Open this URL and log in with your BMW ID:")
-    print(f"    {uri}")
-    print(f"  Enter user code: {auth['user_code']}")
-    print()
-    print("  Finish the browser login completely before doing anything here.")
-    print("  Waiting for approval...")
+    return auth.get("verification_uri_complete") or auth["verification_uri"]
 
+
+def poll_for_tokens(store: TokenStore, auth: dict, verifier: str) -> Tokens:
+    """Poll until the user approves in the browser, or the code expires."""
     interval = int(auth.get("interval", 5))
     deadline = time.time() + int(auth.get("expires_in", 300))
 
@@ -212,6 +214,19 @@ def device_flow(store: TokenStore) -> Tokens:
         raise SystemExit(f"Authorisation failed ({poll.status_code}): {poll.text}")
 
     raise SystemExit("Device code expired before approval. Re-run: bmwcd auth")
+
+
+def device_flow(store: TokenStore) -> Tokens:
+    """Terminal device-code authorisation. Blocks until the user approves."""
+    auth, verifier = request_device_code(store)
+    print()
+    print("  Open this URL and log in with your BMW ID:")
+    print(f"    {verification_uri(auth)}")
+    print(f"  Enter user code: {auth['user_code']}")
+    print()
+    print("  Finish the browser login completely before doing anything here.")
+    print("  Waiting for approval...")
+    return poll_for_tokens(store, auth, verifier)
 
 
 def _check_scopes(body: dict) -> None:

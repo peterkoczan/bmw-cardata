@@ -4,6 +4,55 @@ Standalone subscriber for the BMW CarData streaming interface: MQTT → raw JSON
 → PostgreSQL, with a self-contained map page for replaying where the car went
 and what it was doing.
 
+## Requirements and compatibility
+
+**macOS only.** Not a portability oversight — the service supervision is
+`launchd`, the status indicator is a native menu bar app via `rumps`/PyObjC, and
+several actions shell out to `open` and `pbcopy`. The core (`auth`, `stream`,
+`db`, `export`) is plain Python and would run anywhere; the packaging around it
+is not. On Linux you would swap `launchd` for systemd and drop the menu bar.
+
+| | |
+|---|---|
+| OS | macOS 13+ (Apple Silicon or Intel) |
+| Python | **3.11+** — `tomllib` is stdlib from 3.11 |
+| Database | PostgreSQL 14+ (17 is what `install.sh` sets up, via Homebrew) |
+| Python packages | `paho-mqtt` ≥ 2.1, `requests`, `certifi`, `psycopg[binary]` ≥ 3.2, `rumps` (macOS only) |
+| Optional | Homebrew — only for installing PostgreSQL; Google Chrome — only for regenerating the README screenshot |
+| Network | Outbound TLS 1.3 to `customer.streaming-cardata.bmwgroup.com:9000` and `customer.bmwgroup.com:443` |
+
+**Account requirements**, which no amount of code can work around:
+
+- BMW CarData streaming is **EU-only** at present.
+- An active My BMW account with the vehicle mapped, and you must be the
+  **primary user** of it — a secondary user cannot configure a stream.
+- The vehicle must be new enough to have ConnectedDrive telematics. What you get
+  depends on the instrument cluster: Live Cockpit Professional reports position
+  roughly every 3 minutes or 2 km while moving; Live Cockpit Plus only at trip
+  start and end. Older cars (an i3, say) report rarely and mostly when parked.
+
+Nothing here needs your BMW password. Authorisation is OAuth device-code: you
+sign in on BMW's own site and approve a code.
+
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/peterkoczan/bmw-cardata/main/install.sh | bash
+```
+
+Clones to `~/Developer/bmw-cardata` (override with `BMWCD_DIR`), builds the
+venv, installs and starts PostgreSQL if it is missing (asking first), creates
+the database and schema, fetches BMW's key catalogue, and loads the launchd
+agents. Safe to re-run — it updates an existing clone rather than clobbering it,
+and leaves an existing `config.toml` alone.
+
+Then click the **⚙️ menu bar icon → "Set up / re-authorise…"**. It lists the
+portal steps, takes the Client ID, opens BMW's sign-in with the code already on
+your clipboard, and starts streaming once approved.
+
+Prefer doing it by hand? The portal steps are below and the CLI equivalents are
+in [Use](#use).
+
 ## Portal prerequisites
 
 1. My BMW → Personal Data → My Vehicles → CarData → **Create Client ID**.
@@ -82,13 +131,30 @@ A status glyph with the details behind it:
 | 🟠 | Streaming, but the database is unreachable |
 | 🔴 | Subscriber not running |
 
+⚙️ means not yet set up or not yet authorised.
+
 The menu shows the stream PID, database reachability, how long since the last
-message, and row/key counts. Actions: restart, stop and start the stream,
-rebuild and open the map, open the log.
+message, and row/key counts. Actions:
+
+- **Set up / re-authorise…** — the portal instructions, the Client ID prompt,
+  and the whole OAuth device-code dance. Also how you re-authorise after the
+  refresh token lapses (~2 weeks idle).
+- **Open map** — rebuilds from whatever is in the database right now, then opens
+  it in your browser. Always current, never a stale file.
+- **Retention…** — change how many days the database keeps, written back to
+  `config.toml`, with the option to apply it immediately instead of waiting for
+  the nightly prune.
+- **Restart / Stop / Start** the stream, and **Open log**.
 
 Control goes through `launchctl` rather than signalling the process directly, so
 the supervisor's own view of the job stays correct — stopping from here means
-stopped, not restarted three seconds later by `KeepAlive`.
+stopped, not restarted three seconds later by `KeepAlive`. "Quit indicator"
+boots out its own agent for the same reason, otherwise quitting would achieve
+nothing.
+
+The indicator tolerates having no config at all — it is installed before setup
+has been run, and crashing on a missing `config.toml` would crash-loop under
+`KeepAlive`.
 
 ## Storage
 
