@@ -79,6 +79,7 @@
       <span><i class="sw" style="background:#6b7280"></i>unknown</span>
       <span id="vehsel" class="row"></span>
     </div>
+    <div class="row" id="trips"></div>
   </div>
   <div id="state"></div>
   <div class="note" id="notes"></div>
@@ -121,16 +122,16 @@ const PRIORITY = [
   'vehicle.isMoving',
 ];
 
-const labelFor = key => {
-  const parts = key.split('.').filter(p => p !== 'vehicle');
-  return parts.slice(-2).join(' ')
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/\b\w/g, c => c.toUpperCase());
-};
-const groupFor = key => {
-  const seg = key.split('.')[1];
-  return GROUPS[seg] || 'Other';
-};
+// BMW ships display names and categories in its catalogue; prefer those over
+// anything derived from the key path. The fallback only applies when the
+// catalogue has not been fetched.
+const LABELS = DATA?.labels || {};
+const labelFor = key => LABELS[key]?.n || key.split('.').filter(p => p !== 'vehicle')
+  .slice(-2).join(' ')
+  .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+  .replace(/\b\w/g, c => c.toUpperCase());
+const groupFor = key => LABELS[key]?.c || GROUPS[key.split('.')[1]] || 'Other';
+const describeFor = key => LABELS[key]?.d || key;
 const fmt = (value, unit) => {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   if (typeof value === 'string') {
@@ -229,6 +230,10 @@ const layers = routed.map(v => {
   const segs = L.layerGroup().addTo(map);
   for (let i = 1; i < v.points.length; i++) {
     const a = v.points[i-1], b = v.points[i];
+    // Only join fixes the exporter judged a real, continuous movement. Skipping
+    // the rest is the point: drawing across a feed gap or a post-tunnel jump
+    // invents a road that was never travelled.
+    if (!b.draw) continue;
     const line = L.polyline([[a.lat,a.lon],[b.lat,b.lon]], {
       color: colourFor(b), weight:5, opacity:.9, lineCap:'round',
     });
@@ -305,7 +310,7 @@ function buildPanel(v) {
     for (const k of groupKeys) {
       const tile = document.createElement('div');
       tile.className = 'tile';
-      tile.title = k;
+      tile.title = `${describeFor(k)}\n\n${k}`;
       tile.innerHTML = `<div class="k">${labelFor(k)}</div><div class="v">—</div>`;
       grid.appendChild(tile);
       tiles.set(k, tile);
@@ -371,11 +376,48 @@ vehicles.forEach(v => {
     [...vehsel.children].forEach(c => c.classList.remove('on'));
     b.classList.add('on');
     buildPanel(v);
+    buildTrips(v);
     apply(+slider.value);
   });
   vehsel.appendChild(b);
 });
 if (vehsel.firstChild) vehsel.firstChild.classList.add('on');
+
+/* ---------- trips ---------- */
+// Position updates stop entirely while parked, so a day's fixes are several
+// separate drives rather than one route. Listing them makes that structure
+// usable instead of implicit.
+const tripsEl = document.getElementById('trips');
+
+function buildTrips(v) {
+  tripsEl.innerHTML = '';
+  const trips = (v?.trips || []).filter(t => t.km > 0);
+  if (!trips.length) {
+    tripsEl.innerHTML = '<span class="legend">No completed trips in this window.</span>';
+    return;
+  }
+  const label = document.createElement('span');
+  label.className = 'legend';
+  label.textContent = `${trips.length} trip${trips.length > 1 ? 's' : ''}:`;
+  tripsEl.appendChild(label);
+
+  for (const t of trips) {
+    const b = document.createElement('button');
+    const when = new Date(t.start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
+    b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
+    b.title = `${new Date(t.start).toLocaleString()} → ${new Date(t.end).toLocaleString()}\nmostly ${t.dominant}`;
+    b.addEventListener('click', () => {
+      const pts = v.points.filter(p => p.trip === t.trip).map(p => [p.lat, p.lon]);
+      if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.2));
+      // Scrub to the end of the trip so the panel shows how it finished.
+      const idx = allTimes.findIndex(x => x >= t.end);
+      slider.value = idx < 0 ? slider.max : idx;
+      apply(+slider.value);
+    });
+    tripsEl.appendChild(b);
+  }
+}
 
 const notes = (DATA?.notes || []).slice();
 if (!vehicles.length) notes.unshift('No telemetry recorded yet.');
@@ -383,6 +425,7 @@ notes.push(`generated ${DATA?.generated ?? '—'}`);
 document.getElementById('notes').textContent = notes.join('  ·  ');
 
 buildPanel(current);
+buildTrips(current);
 apply(+slider.value);
 </script>
 </body>

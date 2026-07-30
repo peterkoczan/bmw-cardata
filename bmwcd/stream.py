@@ -4,7 +4,9 @@ Raw JSONL is written first and is the source of truth: the feed is forward-only,
 so anything not captured at the moment it arrives is gone for good.
 """
 
+import fcntl
 import json
+import os
 import queue
 import ssl
 import threading
@@ -180,7 +182,31 @@ def _backoff(failures: int) -> float:
     return min(BASE_BACKOFF * (2 ** max(0, failures - 1)), MAX_BACKOFF)
 
 
+def _single_instance(cfg: Config):
+    """Refuse to start if another streamer already holds the lock.
+
+    BMW allows one connection per GCID, so a second process does not merely
+    duplicate work -- the two evict each other in a loop and neither stays
+    connected. Easy to trigger by running `bmwcd stream` by hand while the
+    launchd agent is up.
+    """
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    handle = open(cfg.data_dir / "stream.lock", "w")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise SystemExit(
+            "Another bmwcd stream is already running (data/stream.lock).\n"
+            "Check: launchctl list | grep bmw-cardata"
+        )
+    handle.write(f"{os.getpid()}\n")
+    handle.flush()
+    return handle  # keep referenced; closing releases the lock
+
+
 def run(cfg: Config, store: TokenStore) -> None:
+    lock = _single_instance(cfg)  # noqa: F841 - held for the process lifetime
     sink = RawSink(cfg.data_dir)
     dbsink = DbSink(cfg)
     print(f"Raw sink: {sink.dir}")

@@ -45,33 +45,73 @@ CREATE TABLE IF NOT EXISTS catalogue (
     vehicle_types text[]
 );
 
+-- Location fixes, paired within a tolerance window.
+--
+-- Latitude and longitude arrive as separate messages. They have shared an
+-- identical measurement timestamp in every fix observed so far, but an exact
+-- join silently drops a fix whenever they straddle a boundary -- one was lost
+-- that way in the first capture. Pairing to the nearest partner within a few
+-- seconds costs nothing and cannot produce a worse answer than discarding the
+-- position entirely.
 DROP VIEW IF EXISTS location;
 CREATE VIEW location AS
-WITH fix AS (
-    SELECT
-        vin,
-        ts,
-        max(num) FILTER (WHERE key LIKE '%currentLocation.latitude')          AS lat,
-        max(num) FILTER (WHERE key LIKE '%currentLocation.longitude')         AS lon,
-        max(num) FILTER (WHERE key LIKE '%currentLocation.altitude')          AS altitude_m,
-        max(num) FILTER (WHERE key LIKE '%currentLocation.heading')           AS heading_deg,
-        max(num) FILTER (WHERE key LIKE '%currentLocation.numberOfSatellites') AS satellites,
-        max(txt) FILTER (WHERE key LIKE '%currentLocation.fixStatus')          AS fix_status
+WITH loc AS (
+    SELECT vin, ts, key, num, txt
     FROM telemetry
     WHERE key LIKE 'vehicle.cabin.infotainment.navigation.currentLocation.%'
-    GROUP BY vin, ts
+),
+lat AS (
+    SELECT vin, ts, num AS lat FROM loc
+    WHERE key LIKE '%.latitude' AND num IS NOT NULL
 )
-SELECT vin, ts, lat, lon, altitude_m, heading_deg, satellites, fix_status
-FROM fix
-WHERE lat IS NOT NULL
-  AND lon IS NOT NULL
-  -- Null island is a sensor artefact, never a real position.
-  AND NOT (lat = 0 AND lon = 0)
-  AND lat BETWEEN -90 AND 90
-  AND lon BETWEEN -180 AND 180
-  -- Drop unresolved fixes. Sources disagree on the spelling ("NO_FIX" vs
-  -- "NO FIX"), so normalise rather than matching a literal.
-  AND replace(replace(upper(coalesce(fix_status, '')), '_', ''), ' ', '') <> 'NOFIX';
+SELECT
+    l.vin,
+    l.ts,
+    l.lat,
+    lo.lon,
+    al.altitude_m,
+    hd.heading_deg,
+    sa.satellites,
+    fx.fix_status
+FROM lat l
+CROSS JOIN LATERAL (
+    SELECT o.num AS lon FROM loc o
+    WHERE o.vin = l.vin AND o.key LIKE '%.longitude' AND o.num IS NOT NULL
+      AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+) lo
+LEFT JOIN LATERAL (
+    SELECT o.num AS altitude_m FROM loc o
+    WHERE o.vin = l.vin AND o.key LIKE '%.altitude' AND o.num IS NOT NULL
+      AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+) al ON true
+LEFT JOIN LATERAL (
+    SELECT o.num AS heading_deg FROM loc o
+    WHERE o.vin = l.vin AND o.key LIKE '%.heading' AND o.num IS NOT NULL
+      AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+) hd ON true
+LEFT JOIN LATERAL (
+    SELECT o.num AS satellites FROM loc o
+    WHERE o.vin = l.vin AND o.key LIKE '%.numberOfSatellites' AND o.num IS NOT NULL
+      AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+) sa ON true
+LEFT JOIN LATERAL (
+    SELECT o.txt AS fix_status FROM loc o
+    WHERE o.vin = l.vin AND o.key LIKE '%.fixStatus' AND o.txt IS NOT NULL
+      AND o.ts BETWEEN l.ts - interval '5 seconds' AND l.ts + interval '5 seconds'
+    ORDER BY abs(extract(epoch FROM o.ts - l.ts)) LIMIT 1
+) fx ON true
+-- Null island is a sensor artefact, never a real position. The loose bound
+-- catches near-zero noise as well as exact zeros.
+WHERE NOT (abs(l.lat) < 0.1 AND abs(lo.lon) < 0.1)
+  AND l.lat BETWEEN -90 AND 90
+  AND lo.lon BETWEEN -180 AND 180
+  -- Drop unresolved fixes. The catalogue says NO_FIX; the localised portal
+  -- writes "NO FIX". Normalise rather than trusting either spelling.
+  AND replace(replace(upper(coalesce(fx.fix_status, '')), '_', ''), ' ', '') <> 'NOFIX';
 
 -- Latest value per key -- the "state as of now" a dashboard header wants.
 CREATE OR REPLACE VIEW latest AS
