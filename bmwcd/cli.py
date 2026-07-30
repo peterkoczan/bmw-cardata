@@ -106,8 +106,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "export":
         days = None
-        if "--days" in sys.argv:
-            days = int(sys.argv[sys.argv.index("--days") + 1])
+        if "--days" in argv:
+            days = int(argv[argv.index("--days") + 1])
         out, data = export.render(cfg, days)
         fixes = sum(len(v["points"]) for v in data["vehicles"])
         print(f"Wrote {out} ({len(data['vehicles'])} vehicle(s), {fixes} fixes)")

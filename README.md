@@ -1,7 +1,8 @@
 # bmw-cardata
 
-Standalone subscriber for the BMW CarData streaming interface. Milestone 1:
-land raw JSONL on disk. Storage (InfluxDB/Timescale) and Grafana come after.
+Standalone subscriber for the BMW CarData streaming interface: MQTT → raw JSONL
+→ PostgreSQL, with a self-contained map page for replaying where the car went
+and what it was doing.
 
 ## Portal prerequisites
 
@@ -17,10 +18,17 @@ land raw JSONL on disk. Storage (InfluxDB/Timescale) and Grafana come after.
 ## Use
 
 ```
-.venv/bin/python -m bmwcd auth      # device-code flow, one-off
-.venv/bin/python -m bmwcd status    # token state
-.venv/bin/python -m bmwcd stream    # subscribe, append to data/raw/
+.venv/bin/python -m bmwcd auth       # device-code flow, one-off
+.venv/bin/python -m bmwcd initdb     # create the schema
+.venv/bin/python -m bmwcd catalogue  # fetch BMW's key metadata
+.venv/bin/python -m bmwcd status     # token state and row counts
+.venv/bin/python -m bmwcd stream     # subscribe -> data/raw/ + Postgres
+.venv/bin/python -m bmwcd export     # render data/viz/map.html
 ```
+
+Only one `stream` may run at a time — a `flock` on `data/stream.lock` enforces
+it. BMW allows one connection per GCID, so a second process does not duplicate
+work, it evicts the first in a loop and neither stays connected.
 
 During `auth`, finish the BMW login in the browser completely before touching
 the terminal — interrupting the flow wedges the device code and it has to be
@@ -68,11 +76,15 @@ python -m bmwcd load     # backfill from raw JSONL, idempotent
 python -m bmwcd prune    # apply retention_days + raw_retention_days
 ```
 
-Two views ship with the schema:
+Alongside `telemetry` sits `catalogue` (see below) and two views:
 
-- `location` — lat/lon/altitude/heading pivoted into points. Latitude and
-  longitude arrive as *separate messages* but share an identical measurement
-  timestamp, so this is an exact group-by, not an interpolation.
+- `location` — latitude, longitude, altitude, heading, satellites and fix status
+  as points. The two coordinates arrive as *separate messages*; they have shared
+  an identical measurement timestamp in every fix seen so far, but the view
+  pairs each latitude with the nearest longitude within 5 seconds rather than
+  requiring an exact match, so a near-miss degrades to a slightly-off pairing
+  instead of a discarded position. It also drops `NO_FIX`, near-zero
+  coordinates, and out-of-range values.
 - `latest` — most recent value per key, for a dashboard header.
 
 Replay for a time slider is a plain range scan:
@@ -149,11 +161,6 @@ engine keys crossed over relative to their key names, so both are consulted and
 either one reporting "running" wins. And `electricEngine.charging.level` looks
 like SoC but is the *predicted* value and is not streamable at all.
 
-Several keys BMW documents as `boolean` actually arrive as `ASN_isTrue` /
-`ASN_isFalse` / `ASN_isUnknown`. The first two are normalised into the `bool`
-column on write; unknown stays text-only, because mapping it to false would
-invent a fact the car never reported.
-
 Position updates depend on the instrument cluster, not the API: Live Cockpit
 Professional emits roughly every 3 minutes or 2 km while moving, Live Cockpit
 Plus only at trip start and end. Expect a coarse polyline either way. Fixes
@@ -229,12 +236,19 @@ The feed is forward-only, so every failure mode below costs data permanently.
   past the 30s keep-alive and got us disconnected — a database problem becoming
   a data-loss problem. On overflow, messages are dropped and counted: the JSONL
   still has them and `bmwcd load` repairs the gap.
-- **Tokens are written atomically.** BMW rotates the refresh token on every
-  refresh; truncating in place meant a crash mid-write destroyed the only copy
-  of a two-week credential.
-- **A stall watchdog** rebuilds the connection if the broker holds the socket
-  open but stops publishing. Default 6 hours, configurable — a parked car is
-  legitimately silent for hours, so a short timer would churn all night.
+- **Tokens are written atomically, and never incompletely.** BMW rotates the
+  refresh token on every refresh, so truncating in place risked destroying the
+  only copy of a two-week credential. A refresh response that omits
+  `refresh_token`, `id_token` or `gcid` is also refused rather than saved —
+  writing a partial file would discard a credential that was still valid.
+- **One `stream` at a time**, enforced by a `flock`. Two processes evict each
+  other under BMW's one-connection-per-GCID rule and neither survives.
+
+There is deliberately **no stall watchdog**. The `id_token` expires hourly, so
+the loop already tears the connection down and rebuilds it every ~55 minutes; a
+wedged subscription cannot outlive that. A separate silence timer would either
+duplicate the token cycle or fire while the car is legitimately parked, which is
+most of the time.
 
 ## Remote control
 
