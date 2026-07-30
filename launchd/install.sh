@@ -7,7 +7,11 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AGENTS="$HOME/Library/LaunchAgents"
-LABELS=(nl.koczan.bmw-cardata.stream nl.koczan.bmw-cardata.prune)
+LABELS=(
+    nl.koczan.bmw-cardata.stream
+    nl.koczan.bmw-cardata.prune
+    nl.koczan.bmw-cardata.menubar
+)
 
 mkdir -p "$AGENTS" "$ROOT/data/logs"
 

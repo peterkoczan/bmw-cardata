@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>nl.koczan.bmw-cardata.menubar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>-u</string>
+        <string>-m</string>
+        <string>bmwcd</string>
+        <string>menubar</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/data/logs/menubar.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/data/logs/menubar.err</string>
+
+    <!-- Needs the Aqua session: it draws a menu bar item. Unlike the stream
+         agent this is a UI process, so no Background ProcessType. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+</dict>
+</plist>

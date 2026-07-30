@@ -333,15 +333,31 @@ def _session(
         if down.is_set():
             return False, state["reason"]
 
-        # No stall watchdog here on purpose. The id_token expires hourly, so
-        # this loop already tears the connection down and rebuilds it every ~55
-        # minutes; a wedged subscription cannot outlive that. An additional
-        # silence timer would either duplicate the token cycle or fire while the
-        # car is legitimately parked and silent, which is most of the time.
-        if down.wait(timeout=hold):
-            return False, state["reason"]
-        print("[mqtt] token refresh due; cycling connection")
-        return True, None
+        # Wait on WALL CLOCK, not a single monotonic timeout.
+        #
+        # The laptop gets its lid closed. macOS stops the monotonic clock while
+        # asleep, but the id_token expires on wall-clock time regardless -- so a
+        # single monotonic wait would come back from a two-hour sleep believing
+        # it still had 50 minutes left on a token that died an hour ago, sitting
+        # on a socket the network dropped long before.
+        #
+        # Slicing the wait and comparing against time.time() means a resume is
+        # noticed within 30s and cycles straight into a refresh + reconnect.
+        deadline = time.time() + hold
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                print("[mqtt] token refresh due; cycling connection")
+                return True, None
+            before = time.time()
+            if down.wait(timeout=min(30.0, remaining)):
+                return False, state["reason"]
+            # A slice that took far longer in wall-clock terms than we asked for
+            # means the machine was suspended in the middle of it.
+            slept = time.time() - before
+            if slept > 120:
+                print(f"[mqtt] resumed after {slept / 60:.0f}m suspended; cycling")
+                return True, None
     finally:
         client.disconnect()
         client.loop_stop()

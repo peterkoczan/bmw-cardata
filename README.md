@@ -40,20 +40,55 @@ restarted.
 ./launchd/install.sh
 ```
 
-Installs two user LaunchAgents (idempotent — re-run after editing a plist):
+Installs three user LaunchAgents (idempotent — re-run after editing a plist):
 
 - `nl.koczan.bmw-cardata.stream` — `RunAtLoad` + `KeepAlive`, so it starts at
   login and restarts on any exit. `ThrottleInterval` 30s stops a crash-loop
   hammering BMW when the refresh token has expired and needs `bmwcd auth` by hand.
 - `nl.koczan.bmw-cardata.prune` — daily at 04:00.
+- `nl.koczan.bmw-cardata.menubar` — the status indicator (below).
 
 Logs land in `data/logs/`. Check state with `launchctl list | grep bmw-cardata`.
 
-**This does not survive sleep.** A LaunchAgent runs while you are logged in; it
-does not keep the Mac awake. A closed lid means no data, and because the feed is
-forward-only that gap can never be backfilled. For genuinely continuous capture
-the service belongs on an always-on host — at which point remember BMW allows
-only one stream connection per GCID, so it moves rather than being duplicated.
+### Sleep
+
+Closing the lid loses data — the feed is forward-only and nothing buffers it —
+but the service resumes on its own without intervention.
+
+That needed a specific fix. The session wait was driven by `time.monotonic()`,
+which macOS **stops while the machine is asleep**, whereas the `id_token`
+expires on wall-clock time. A single monotonic wait would therefore return from
+a two-hour sleep still believing it had 50 minutes left on a token that died an
+hour earlier, sitting on a socket the network dropped long before. The wait is
+now sliced and compared against `time.time()`, so a resume is noticed within 30
+seconds and cycles straight into a refresh and reconnect.
+
+For genuinely continuous capture the service belongs on an always-on host — at
+which point remember BMW allows only one stream connection per GCID, so it moves
+rather than being duplicated.
+
+### Menu bar
+
+```
+python -m bmwcd menubar     # or let the launchd agent run it
+```
+
+A status glyph with the details behind it:
+
+| Glyph | Meaning |
+|---|---|
+| 🟢 | Streaming, database up, heard from the car recently |
+| 🟡 | Up, but nothing from the car for over 6 hours — usually just parked |
+| 🟠 | Streaming, but the database is unreachable |
+| 🔴 | Subscriber not running |
+
+The menu shows the stream PID, database reachability, how long since the last
+message, and row/key counts. Actions: restart, stop and start the stream,
+rebuild and open the map, open the log.
+
+Control goes through `launchctl` rather than signalling the process directly, so
+the supervisor's own view of the job stays correct — stopping from here means
+stopped, not restarted three seconds later by `KeepAlive`.
 
 ## Storage
 
