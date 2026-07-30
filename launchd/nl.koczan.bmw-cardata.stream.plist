@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>nl.koczan.bmw-cardata.stream</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>-u</string>
+        <string>-m</string>
+        <string>bmwcd</string>
+        <string>stream</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Restart on any exit. The stream must never be left down: the feed is
+         forward-only, so a gap is unrecoverable. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't hammer BMW if we are crash-looping (e.g. an expired refresh
+         token, which needs `bmwcd auth` by hand). -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/data/logs/stream.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/data/logs/stream.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

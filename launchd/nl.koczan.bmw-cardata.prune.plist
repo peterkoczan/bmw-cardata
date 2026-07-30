@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>nl.koczan.bmw-cardata.prune</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__ROOT__/.venv/bin/python</string>
+        <string>-u</string>
+        <string>-m</string>
+        <string>bmwcd</string>
+        <string>prune</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__ROOT__</string>
+
+    <!-- Daily at 04:00. If the machine is asleep at the time, launchd runs it
+         once on next wake rather than skipping the day. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>4</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__ROOT__/data/logs/prune.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROOT__/data/logs/prune.err</string>
+</dict>
+</plist>
