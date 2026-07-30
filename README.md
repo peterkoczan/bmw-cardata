@@ -133,11 +133,28 @@ If I close the lid I lose whatever the car sent while it was shut. That's fine,
 I'm not going to leave it open all night. What matters is that it picks itself
 back up, and it does.
 
-That needed a fix, though. macOS stops the monotonic clock while asleep, but the
-token expires on real time. So the wait would come back from a two hour sleep
-thinking it still had 50 minutes left on a token that died an hour ago, sitting
-on a dead socket. It now watches both clocks and notices a resume within 30
-seconds.
+Unless you stop it deliberately, it always comes back — from sleep, from losing
+wifi, from anything. Getting that right took two goes.
+
+First: the wait was driven by the monotonic clock while the token expires on real
+time, so it could come back from a long sleep thinking it still had 50 minutes
+left on a token that died an hour ago. That one's driven by wall clock now.
+
+Then a real overnight test caught the actual problem. The lid was shut for 90
+minutes, and every reconnect during that time failed with no network — but each
+failure still climbed the backoff ladder: 5s, 10, 20, 40, 80, 160. It eventually
+got a connection, dropped once more, and that landed on step 7, which is a
+5-minute wait. So it looked dead when it was just sleeping off a counter it
+should never have accumulated.
+
+Two changes. Attempts that never reach BMW no longer count — if DNS can't even
+resolve the broker there's no network, so it retries steadily every 15s without
+escalating. And a session that actually connected and ran for a minute resets the
+counter, because whatever ends it is a fresh incident, not the seventh step of
+something.
+
+Every log line is timestamped now too. Working out what happened that night meant
+lining the log up against `pmset -g log` by hand, which was annoying enough once.
 
 If you want no gaps at all, this belongs on something that's always on. Just
 remember it has to *move* there, not run in both places.

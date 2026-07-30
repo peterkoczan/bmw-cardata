@@ -9,6 +9,7 @@ import json
 import os
 import queue
 import signal
+import socket
 import ssl
 import threading
 import time
@@ -22,6 +23,15 @@ from paho.mqtt.enums import CallbackAPIVersion
 from . import db, logs
 from .auth import REFRESH_MARGIN, AuthRetryable, TokenStore, Tokens
 from .config import Config
+
+def _log(message: str) -> None:
+    """Every line timestamped.
+
+    Reconstructing a sleep/wake incident from bare `[mqtt] reconnecting in 300s`
+    lines meant correlating against `pmset -g log` by hand. Cheap to fix.
+    """
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {message}", flush=True)
+
 
 HOST = "customer.streaming-cardata.bmwgroup.com"
 PORT = 9000
@@ -131,7 +141,7 @@ class DbSink:
         except queue.Full:
             self.dropped += 1
             if self.dropped % 100 == 1:
-                print(f"[db] queue full, {self.dropped} message(s) not stored "
+                _log(f"[db] queue full, {self.dropped} message(s) not stored "
                       f"(raw JSONL intact; repair with: bmwcd load)")
 
     def _drain(self) -> None:
@@ -145,11 +155,11 @@ class DbSink:
                     self.conn = db.connect(self.cfg)
                 db.write(self.conn, payload, self.catalogue)
                 if self.degraded:
-                    print("[db] reconnected")
+                    _log("[db] reconnected")
                     self.degraded = False
             except Exception as exc:  # noqa: BLE001 - never let the DB break capture
                 if not self.degraded:
-                    print(f"[db] unavailable, raw capture continues: {exc}")
+                    _log(f"[db] unavailable, raw capture continues: {exc}")
                     self.degraded = True
                 self.conn = None
                 time.sleep(1.0)  # do not spin against a down database
@@ -171,7 +181,7 @@ class DbSink:
         self._stop.set()
         self._worker.join(timeout=5)
         if left:
-            print(f"[db] {left} message(s) still queued at shutdown; "
+            _log(f"[db] {left} message(s) still queued at shutdown; "
                   f"raw JSONL is intact — repair with: bmwcd load")
         # Connection ownership stays with the worker; only close it here if the
         # worker is genuinely gone, otherwise we yank it mid-insert.
@@ -191,6 +201,25 @@ BASE_BACKOFF = 5
 MAX_BACKOFF = 300
 EXTENDED_AFTER = 10  # consecutive failures before backing off much harder
 EXTENDED_BACKOFF = 600
+
+
+OFFLINE_RETRY = 15.0
+PRODUCTIVE_AFTER = 60.0  # a session this long did real work, whatever ended it
+
+
+def _have_network() -> bool:
+    """Can we even resolve BMW's broker?
+
+    Deliberately DNS-only: it touches nothing of BMW's, and it cleanly separates
+    "this laptop has no network" from "BMW is refusing us". A closed lid produces
+    a run of failed connects that never left the machine, and letting those climb
+    the backoff ladder means waiting minutes after the network is genuinely back.
+    """
+    try:
+        socket.getaddrinfo(HOST, PORT, proto=socket.IPPROTO_TCP)
+        return True
+    except OSError:
+        return False
 
 
 def _backoff(failures: int) -> float:
@@ -241,7 +270,7 @@ def _wait_for_new_tokens(limit: float = 3600.0, tick: float = 15.0) -> bool:
     while time.monotonic() - start < limit:
         time.sleep(tick)
         if stamp() != before:
-            print("[auth] credentials changed; retrying")
+            _log("[auth] credentials changed; retrying")
             return True
     return False
 
@@ -294,7 +323,7 @@ def run(cfg: Config, store: TokenStore) -> None:
                 # and hand launchd a crash loop against BMW's auth endpoint.
                 failures += 1
                 delay = _backoff(failures)
-                print(f"[auth] {exc}; retrying in {delay:.0f}s")
+                _log(f"[auth] {exc}; retrying in {delay:.0f}s")
                 _status(cfg, "auth_retry", f"{exc} (retry in {delay:.0f}s)")
                 time.sleep(delay)
                 continue
@@ -308,17 +337,32 @@ def run(cfg: Config, store: TokenStore) -> None:
                 # Park instead, and watch tokens.json -- re-authorising from the
                 # menu bar rewrites it, so the stream heals by itself within
                 # seconds instead of needing a manual restart.
-                print(f"[auth] {exc}")
+                _log(f"[auth] {exc}")
                 _status(cfg, "needs_auth", str(exc).splitlines()[0][:120])
                 if not _wait_for_new_tokens():
-                    print("[auth] still no new credentials; retrying anyway")
+                    _log("[auth] still no new credentials; retrying anyway")
                 continue
 
             _assert_gcid(cfg, tokens)
-            ok, reason = _session(cfg, tokens, sink, dbsink)
+            ok, reason, productive = _session(cfg, tokens, sink, dbsink)
             if ok:
                 failures = 0
                 continue
+
+            if not _have_network():
+                # Nothing reached BMW, so this is not evidence of anything being
+                # wrong with us or them. Retry steadily without burning the
+                # ladder, so the moment the lid opens we reconnect promptly.
+                _log(f"[mqtt] no network; retrying in {OFFLINE_RETRY:.0f}s")
+                _status(cfg, "offline", "waiting for network")
+                time.sleep(OFFLINE_RETRY)
+                continue
+
+            if productive:
+                # It connected, subscribed and ran for a while. Whatever ended it
+                # is a fresh incident, not the seventh step of an escalation --
+                # otherwise an hourly drop eventually pins the retry at 10 min.
+                failures = 0
             failures += 1
             # max, not `or`: `or` used the mapped constant *instead of* the
             # backoff, so a persistent 135 or 151 retried at a flat 30s/60s
@@ -326,7 +370,7 @@ def run(cfg: Config, store: TokenStore) -> None:
             # never be accepted, and EXTENDED_BACKOFF unreachable for exactly
             # the four codes it exists for. The constant is a floor, not a cap.
             delay = max(REASON_DELAY.get(reason, 0), _backoff(failures))
-            print(f"[mqtt] reconnecting in {delay:.0f}s (failure {failures})")
+            _log(f"[mqtt] reconnecting in {delay:.0f}s (failure {failures})")
             _status(cfg, "reconnecting", f"failure {failures}, retry in {delay:.0f}s")
             time.sleep(delay)
     except KeyboardInterrupt:
@@ -345,9 +389,15 @@ def _assert_gcid(cfg: Config, tokens: Tokens) -> None:
         )
 
 
+def _productive(state) -> bool:
+    """Did this session subscribe and then survive long enough to count?"""
+    at = state.get("subscribed_at")
+    return at is not None and (time.monotonic() - at) >= PRODUCTIVE_AFTER
+
+
 def _session(
     cfg: Config, tokens: Tokens, sink: RawSink, dbsink: "DbSink"
-) -> tuple[bool, int | None]:
+) -> tuple[bool, int | None, bool]:
     """One MQTT connection, torn down when the id_token nears expiry.
 
     Rebuilding on every refresh is deliberate: reusing a connection across a
@@ -359,33 +409,35 @@ def _session(
     """
     down = threading.Event()
     connected = threading.Event()
-    state = {"reason": None}
+    state = {"reason": None, "subscribed_at": None}
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         connected.set()
         if reason_code != 0:
-            print(f"[mqtt] connect refused: {reason_code}")
+            _log(f"[mqtt] connect refused: {reason_code}")
             state["reason"] = int(getattr(reason_code, "value", reason_code))
             down.set()
             return
         topics = _topics(cfg, tokens.gcid)
         for topic in topics:
             client.subscribe(topic, qos=1)
-        print(f"[mqtt] connected, subscribing to {', '.join(topics)}")
+        _log(f"[mqtt] connected, subscribing to {', '.join(topics)}")
         _status(cfg, "connected")
 
     def on_subscribe(client, userdata, mid, reason_codes, properties=None):
         # A refused subscription otherwise leaves us "connected" with no data
         # and no error. Treat any failure code (>= 0x80) as fatal for this
         # session so the supervisor rebuilds rather than sitting on a dead socket.
+        if not any(int(rc.value) >= 0x80 for rc in reason_codes):
+            state["subscribed_at"] = time.monotonic()
         failed = [rc for rc in reason_codes if int(rc.value) >= 0x80]
         if failed:
-            print(f"[mqtt] subscription refused: {[str(r) for r in failed]}")
+            _log(f"[mqtt] subscription refused: {[str(r) for r in failed]}")
             state["reason"] = int(failed[0].value)
             down.set()
 
     def on_disconnect(client, userdata, flags, reason_code, properties=None):
-        print(f"[mqtt] disconnected: {reason_code}")
+        _log(f"[mqtt] disconnected: {reason_code}")
         state["reason"] = int(getattr(reason_code, "value", reason_code) or 0)
         down.set()
 
@@ -399,9 +451,9 @@ def _session(
             body = sink.write(msg.topic, msg.payload)  # durable first
             if isinstance(body, dict):
                 dbsink.write(body)  # enqueue only; never block this thread
-            print(f"{datetime.now().strftime('%H:%M:%S')} {_summarise(body)}")
+            _log(_summarise(body))
         except Exception as exc:  # noqa: BLE001
-            print(f"[mqtt] message handling failed: {exc!r}")
+            _log(f"[mqtt] message handling failed: {exc!r}")
             state["reason"] = None
             down.set()
 
@@ -421,7 +473,7 @@ def _session(
     client.on_message = on_message
 
     hold = max(60.0, tokens.seconds_left() - REFRESH_MARGIN)
-    print(f"[mqtt] connecting; token good for {int(tokens.seconds_left())}s")
+    _log(f"[mqtt] connecting; token good for {int(tokens.seconds_left())}s")
 
     # connect_async + loop_start rather than blocking connect(): a wedged TLS
     # handshake never fires a callback and a blocking connect can hang there
@@ -431,14 +483,14 @@ def _session(
         try:
             client.connect_async(HOST, PORT, keepalive=KEEPALIVE)
         except OSError as exc:
-            print(f"[mqtt] connect failed: {exc}")
-            return False, None
+            _log(f"[mqtt] connect failed: {exc}")
+            return False, None, _productive(state)
 
         if not connected.wait(timeout=CONNECT_TIMEOUT):
-            print(f"[mqtt] no CONNACK within {CONNECT_TIMEOUT}s")
-            return False, None
+            _log(f"[mqtt] no CONNACK within {CONNECT_TIMEOUT}s")
+            return False, None, _productive(state)
         if down.is_set():
-            return False, state["reason"]
+            return False, state["reason"], _productive(state)
 
         # Two clocks, because neither alone is trustworthy here.
         #
@@ -454,8 +506,8 @@ def _session(
                 wall_deadline - time.time(), mono_deadline - time.monotonic()
             )
             if remaining <= 0:
-                print("[mqtt] token refresh due; cycling connection")
-                return True, None
+                _log("[mqtt] token refresh due; cycling connection")
+                return True, None, True
 
             wall_before, mono_before = time.time(), time.monotonic()
             woke = down.wait(timeout=min(30.0, remaining))
@@ -471,16 +523,16 @@ def _session(
             # unlike a bare wall-clock threshold it cannot be faked by an NTP
             # step, which moves both clocks' *difference* not at all.
             if wall_elapsed - mono_elapsed > 60:
-                print(f"[mqtt] resumed after {wall_elapsed / 60:.0f}m suspended; cycling")
-                return True, None
+                _log(f"[mqtt] resumed after {wall_elapsed / 60:.0f}m suspended; cycling")
+                return True, None, _productive(state)
             if woke:
-                return False, state["reason"]
+                return False, state["reason"], _productive(state)
             _status(cfg, "connected")
             # Checked here rather than only in the nightly prune: this is the
             # always-on process, and a busy drive can add tens of megabytes
             # between two 04:00 runs. A stat every 30s costs nothing.
             for name in logs.rotate_all(cfg):
-                print(f"[logs] rotated {name}")
+                _log(f"[logs] rotated {name}")
     finally:
         _status(cfg, "disconnected")
         client.disconnect()
