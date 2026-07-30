@@ -1,7 +1,7 @@
 import sys
 from datetime import date, datetime, timedelta
 
-from . import auth, catalogue, config, db, export, stream
+from . import auth, catalogue, config, db, export, logs, stream
 
 USAGE = """usage: python -m bmwcd <command>
 
@@ -94,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
                 path.unlink()
                 removed += 1
         print(f"Removed {removed} raw file(s) older than {cfg.raw_retention_days} days.")
+        # Also covers the case where the stream is not running to rotate its own.
+        for name in logs.rotate_all(cfg):
+            print(f"Rotated {name} (over {cfg.log_max_mb} MB)")
         return 0
 
     if cmd == "menubar":

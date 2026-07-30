@@ -93,9 +93,19 @@ connection per account, so two of them just kick each other off in a loop.
 ```
 
 Three agents: the stream itself (restarts if it dies), a nightly prune at 04:00,
-and the menu bar app. Logs go to `data/logs/`. If a plist hasn't changed the
-script leaves that agent running rather than bouncing it, because restarting the
-stream for no reason costs you data.
+and the menu bar app. If a plist hasn't changed the script leaves that agent
+running rather than bouncing it, because restarting the stream for no reason
+costs you data.
+
+Logs go to `data/logs/` and rotate on size, not age — they grow with how much you
+drive, not with the calendar. Default is 10 MB with 3 old copies kept
+(`log_max_mb`, `log_keep`). The running stream checks every 30 seconds and the
+nightly prune checks too, in case it isn't running.
+
+It rotates by copying and truncating rather than renaming, which looks odd until
+you remember launchd opens the log itself and holds onto that file for the life
+of the job. Rename it and launchd cheerfully keeps writing to the renamed copy
+while the "current" log sits there empty.
 
 ### The menu bar
 

@@ -19,7 +19,7 @@ import certifi
 import paho.mqtt.client as mqtt
 from paho.mqtt.enums import CallbackAPIVersion
 
-from . import db
+from . import db, logs
 from .auth import REFRESH_MARGIN, AuthRetryable, TokenStore, Tokens
 from .config import Config
 
@@ -476,6 +476,11 @@ def _session(
             if woke:
                 return False, state["reason"]
             _status(cfg, "connected")
+            # Checked here rather than only in the nightly prune: this is the
+            # always-on process, and a busy drive can add tens of megabytes
+            # between two 04:00 runs. A stat every 30s costs nothing.
+            for name in logs.rotate_all(cfg):
+                print(f"[logs] rotated {name}")
     finally:
         _status(cfg, "disconnected")
         client.disconnect()
