@@ -77,6 +77,7 @@
       <span><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol</span>
       <span><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
       <span><i class="sw" style="background:#6b7280"></i>unknown</span>
+      <span><i class="sw" style="width:9px;height:9px;border-radius:50%;background:#8aa;border:1.5px solid #fff"></i>received fix</span>
       <span id="vehsel" class="row"></span>
     </div>
     <div class="row" id="trips"></div>
@@ -198,6 +199,12 @@ function showHover(v, pt, e) {
   push('Odometer', odo && fmt(odo.value, odo.unit));
 
   push('Segment', pt.km ? `${pt.km.toFixed(2)} km` : null);
+  // How long since the previous fix, so a long line reads as either a fast
+  // straight road or a gap in what BMW sent.
+  if (pt.gap_s != null) {
+    const g = pt.gap_s;
+    push('Since last fix', g < 90 ? `${g}s` : `${Math.floor(g/60)}m ${g%60}s`);
+  }
   push('Heading', pt.heading != null ? `${pt.heading}°` : null);
   push('Altitude', pt.alt != null ? `${pt.alt} m` : null);
   push('Fix', [pt.fix, pt.sats != null ? `${pt.sats} sats` : null].filter(Boolean).join(' · ') || null);
@@ -262,6 +269,21 @@ const layers = routed.map(v => {
     segs.addLayer(line);
     b._line = line;
   }
+  // A dot per received fix. Without these a 500 m straight road and an
+  // 8-minute hole in the feed look identical, and BMW's cadence is uneven
+  // enough that most long straight lines are the latter.
+  for (const p of v.points) {
+    const dot = L.circleMarker([p.lat, p.lon], {
+      radius: 3.5, weight: 1.5, color: '#fff', opacity: .9,
+      fillColor: colourFor(p), fillOpacity: 1,
+    });
+    dot.on('mousemove', e => showHover(v, p, e));
+    dot.on('mouseover', e => showHover(v, p, e));
+    dot.on('mouseout', hideHover);
+    segs.addLayer(dot);
+    p._dot = dot;
+  }
+
   const marker = L.marker([v.points[0].lat, v.points[0].lon], { title:v.vin })
     .addTo(map).bindPopup(v.vin);
   return { v, segs, marker };
@@ -373,9 +395,12 @@ function apply(idx) {
     const p = lastAtOrBefore(v.points, t);
     if (p) { marker.setLatLng([p.lat, p.lon]); marker.setOpacity(1); }
     else marker.setOpacity(.25);
-    for (let i = 1; i < v.points.length; i++) {
+    for (let i = 0; i < v.points.length; i++) {
+      const past = v.points[i].t <= t;
       const seg = v.points[i]._line;
-      if (seg) seg.setStyle({ opacity: v.points[i].t <= t ? .9 : .12 });
+      if (seg) seg.setStyle({ opacity: past ? .9 : .12 });
+      const dot = v.points[i]._dot;
+      if (dot) dot.setStyle({ opacity: past ? .9 : .1, fillOpacity: past ? 1 : .1 });
     }
   }
   paintPanel(current, t);
