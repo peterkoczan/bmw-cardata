@@ -134,8 +134,12 @@ def _mode(prev_t, t, s, fallback_km):
     distance covered between the two fixes.
     """
     km = _odometer_delta(s["dist"], prev_t, t)
-    if km is None:
-        km = fallback_km  # odometer unusable; fall back to GPS distance
+    if not km:
+        # `not km`, not `is None`: travelledDistance is whole kilometres while
+        # fixes arrive every ~3 minutes, so most city segments span less than
+        # one odometer tick and the delta is a legitimate 0.0. The odometer can
+        # prove the car moved; at that resolution it can never prove it didn't.
+        km = fallback_km
     if not km or km <= 0:
         return {"mode": "idle", "intensity": 0.0, "km": km or 0.0}
 

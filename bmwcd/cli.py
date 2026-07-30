@@ -13,6 +13,7 @@ USAGE = """usage: python -m bmwcd <command>
   prune    drop rows and raw files past their retention windows
   export   render the map page to data/viz/map.html  [--days N]
   catalogue  refresh BMW's telematic data catalogue (public API, no auth)
+  menubar  macOS menu bar status indicator and start/stop controls
 """
 
 
@@ -93,6 +94,14 @@ def main(argv: list[str] | None = None) -> int:
                 path.unlink()
                 removed += 1
         print(f"Removed {removed} raw file(s) older than {cfg.raw_retention_days} days.")
+        return 0
+
+    if cmd == "menubar":
+        # Imported lazily: rumps pulls in pyobjc and is macOS-only, so the rest
+        # of the CLI must not depend on it being installed.
+        from . import menubar
+
+        menubar.run()
         return 0
 
     if cmd == "catalogue":
