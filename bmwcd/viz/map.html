@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BMW CarData — track</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36;
+    --text: #e6e9ef; --muted: #99a1b3; --tile: #1d212a;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b; --muted:#5b6474; --tile:#f2f4f7; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--text);
+    font:14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  #map { position:absolute; inset:0 0 var(--barH,300px) 0; background:var(--bg); }
+  .leaflet-container { background: var(--bg); }
+
+  #bar { position:absolute; left:0; right:0; bottom:0; height:var(--barH,300px);
+    background:var(--panel); border-top:1px solid var(--line);
+    display:flex; flex-direction:column; }
+  .controls { padding:10px 16px 8px; display:flex; flex-direction:column; gap:7px;
+    border-bottom:1px solid var(--line); }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #clock { font-variant-numeric:tabular-nums; font-weight:600; min-width:185px; }
+  input[type=range] { flex:1; min-width:200px; accent-color:#3b82f6; }
+  button { background:var(--line); color:var(--text); border:0; border-radius:6px;
+    padding:6px 12px; cursor:pointer; font-size:13px; }
+  button:hover { filter:brightness(1.25); }
+  button.on { background:#3b82f6; color:#fff; }
+  .legend { color:var(--muted); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
+  .sw { display:inline-block; width:22px; height:8px; border-radius:2px;
+    vertical-align:middle; margin-right:5px; }
+  .note { color:var(--muted); font-size:11.5px; padding:0 16px 6px; }
+
+  #state { flex:1; overflow-y:auto; padding:10px 16px 14px; }
+  .group { margin-bottom:12px; }
+  .group h4 { margin:0 0 6px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--muted); font-weight:600; }
+  .tiles { display:grid; gap:7px; grid-template-columns:repeat(auto-fill, minmax(178px, 1fr)); }
+  .tile { background:var(--tile); border-radius:7px; padding:7px 10px; min-width:0; }
+  .tile .k { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden;
+    text-overflow:ellipsis; }
+  .tile .v { font-size:15px; font-weight:600; font-variant-numeric:tabular-nums;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tile.stale .v { color:var(--muted); font-weight:400; }
+
+  #hover { position:absolute; z-index:1000; pointer-events:none; display:none;
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; min-width:190px; box-shadow:0 6px 22px rgba(0,0,0,.35);
+    font-size:12.5px; }
+  #hover .h { font-weight:600; margin-bottom:5px; font-variant-numeric:tabular-nums; }
+  #hover dl { margin:0; display:grid; grid-template-columns:auto 1fr; gap:2px 10px; }
+  #hover dt { color:var(--muted); white-space:nowrap; }
+  #hover dd { margin:0; text-align:right; font-variant-numeric:tabular-nums; }
+  #hover .mode { display:inline-block; width:9px; height:9px; border-radius:50%;
+    margin-right:5px; vertical-align:baseline; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hover"></div>
+<div id="bar">
+  <div class="controls">
+    <div class="row">
+      <button id="play">▶︎ Play</button>
+      <span id="clock">—</span>
+      <input type="range" id="slider" min="0" max="0" value="0" step="1">
+      <button id="end">Latest</button>
+    </div>
+    <div class="row legend">
+      <span><i class="sw" style="background:linear-gradient(90deg,#bfdbfe,#1d4ed8)"></i>electric</span>
+      <span><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol</span>
+      <span><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
+      <span><i class="sw" style="background:#6b7280"></i>unknown</span>
+      <span id="vehsel" class="row"></span>
+    </div>
+  </div>
+  <div id="state"></div>
+  <div class="note" id="notes"></div>
+</div>
+<script>
+const DATA = /*__DATA__*/null;
+
+/* ---------- route colouring ---------- */
+const RAMPS = {
+  electric:['#bfdbfe','#1d4ed8'], petrol:['#fecaca','#b91c1c'], regen:['#bbf7d0','#15803d'],
+  unknown:['#6b7280','#6b7280'], idle:['#6b7280','#6b7280'], start:['#6b7280','#6b7280'],
+};
+const mix = (a,b,t) => {
+  const p = h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16));
+  const [ar,ag,ab]=p(a), [br,bg,bb]=p(b);
+  const c=(x,y)=>Math.round(x+(y-x)*t).toString(16).padStart(2,'0');
+  return `#${c(ar,br)}${c(ag,bg)}${c(ab,bb)}`;
+};
+const colourFor = pt => {
+  const [lo,hi] = RAMPS[pt.mode] || RAMPS.unknown;
+  return mix(lo, hi, Math.max(0, Math.min(1, pt.intensity ?? 0)));
+};
+
+/* ---------- value formatting ---------- */
+const GROUPS = {
+  drivetrain:'Drivetrain', powertrain:'Powertrain', chassis:'Chassis',
+  cabin:'Cabin', body:'Body', vehicle:'Vehicle', trip:'Trip',
+};
+// Keys worth seeing first, in this order, regardless of their group.
+const PRIORITY = [
+  'vehicle.drivetrain.batteryManagement.header',
+  'vehicle.drivetrain.fuelSystem.level',
+  'vehicle.drivetrain.fuelSystem.remainingFuel',
+  'vehicle.vehicle.travelledDistance',
+  'vehicle.drivetrain.lastRemainingRange',
+  'vehicle.drivetrain.electricEngine.kombiRemainingElectricRange',
+  'vehicle.drivetrain.electricEngine.charging.status',
+  'vehicle.drivetrain.electricEngine.charging.hvStatus',
+  'vehicle.drivetrain.engine.isIgnitionOn',
+  'vehicle.isMoving',
+];
+
+const labelFor = key => {
+  const parts = key.split('.').filter(p => p !== 'vehicle');
+  return parts.slice(-2).join(' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, c => c.toUpperCase());
+};
+const groupFor = key => {
+  const seg = key.split('.')[1];
+  return GROUPS[seg] || 'Other';
+};
+const fmt = (value, unit) => {
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'string') {
+    // ASN_isUnknown and friends read badly raw.
+    return value.replace(/^ASN_is/i, '').replace(/_/g, ' ');
+  }
+  if (typeof value === 'number') {
+    // Tyre pressures come in kPa; bar is what anyone actually reads off a gauge.
+    if (unit === 'kpa') return (value / 100).toFixed(1) + ' bar';
+    const n = Number.isInteger(value) ? value : Math.round(value * 100) / 100;
+    if (!unit || unit === '-') return String(n);
+    // Symbols bind tight to the number; worded units keep their space.
+    const symbol = { percent: '%', degrees: '°' }[unit];
+    return symbol ? `${n}${symbol}` : `${n} ${unit}`;
+  }
+  return '—';
+};
+
+/* ---------- hover readout ---------- */
+const hoverEl = document.getElementById('hover');
+
+function stateAt(v, key, t) {
+  const s = v.state?.[key];
+  if (!s) return null;
+  let hit = null;
+  for (const row of s.v) { if (row[0] <= t) hit = row; else break; }
+  return hit ? { value: hit[1], unit: s.u } : null;
+}
+
+function speedAt(v, t) {
+  // BMW does not transmit exact speed -- privacy restriction. The catalogue
+  // offers only a bucketed range, so report the band or say nothing was sent.
+  const lo = stateAt(v, 'vehicle.vehicle.speedRange.lowerBound', t);
+  const hi = stateAt(v, 'vehicle.vehicle.speedRange.upperBound', t);
+  if (!lo && !hi) return 'not reported';
+  if (lo && hi) return `${lo.value}–${hi.value} km/h`;
+  const one = lo || hi;
+  return `${one.value} km/h${lo ? '+' : ' or less'}`;
+}
+
+function consumptionOf(pt) {
+  if (pt.kwh_per_100km != null) return `${pt.kwh_per_100km} kWh/100km`;
+  if (pt.l_per_100km != null) return `${pt.l_per_100km} l/100km`;
+  if (pt.fuel_pct_per_100km != null) return `${pt.fuel_pct_per_100km} %/100km`;
+  if (pt.kwh != null) return `${pt.kwh} kWh recovered`;
+  return null;
+}
+
+function showHover(v, pt, e) {
+  const t = pt.t;
+  const rows = [];
+  const push = (label, value) => { if (value != null && value !== '') rows.push([label, value]); };
+
+  push('Speed', speedAt(v, t));
+  push('Consumption', consumptionOf(pt));
+
+  const soc = stateAt(v, 'vehicle.drivetrain.batteryManagement.header', t);
+  push('Charge', soc && fmt(soc.value, soc.unit));
+  const fuel = stateAt(v, 'vehicle.drivetrain.fuelSystem.level', t);
+  push('Fuel', fuel && fmt(fuel.value, fuel.unit));
+  const odo = stateAt(v, 'vehicle.vehicle.travelledDistance', t);
+  push('Odometer', odo && fmt(odo.value, odo.unit));
+
+  push('Segment', pt.km ? `${pt.km.toFixed(2)} km` : null);
+  push('Heading', pt.heading != null ? `${pt.heading}°` : null);
+  push('Altitude', pt.alt != null ? `${pt.alt} m` : null);
+  push('Fix', [pt.fix, pt.sats != null ? `${pt.sats} sats` : null].filter(Boolean).join(' · ') || null);
+
+  hoverEl.innerHTML =
+    `<div class="h">${new Date(t).toLocaleString()}</div>` +
+    `<div class="h"><span class="mode" style="background:${colourFor(pt)}"></span>${pt.mode}</div>` +
+    '<dl>' + rows.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join('') + '</dl>';
+
+  hoverEl.style.display = 'block';
+  // Flip the box away from the pointer near the right/bottom edges so it never
+  // runs off screen.
+  const p = e.originalEvent;
+  const w = hoverEl.offsetWidth, h = hoverEl.offsetHeight;
+  const x = p.clientX + 14, y = p.clientY + 14;
+  hoverEl.style.left = (x + w > window.innerWidth ? p.clientX - w - 14 : x) + 'px';
+  hoverEl.style.top  = (y + h > window.innerHeight ? p.clientY - h - 14 : y) + 'px';
+}
+
+function hideHover() { hoverEl.style.display = 'none'; }
+
+/* ---------- map ---------- */
+const map = L.map('map', { zoomControl: true });
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+  attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:20,
+}).addTo(map);
+
+const vehicles = DATA?.vehicles || [];
+const routed = vehicles.filter(v => v.points?.length);
+
+const layers = routed.map(v => {
+  const segs = L.layerGroup().addTo(map);
+  for (let i = 1; i < v.points.length; i++) {
+    const a = v.points[i-1], b = v.points[i];
+    const line = L.polyline([[a.lat,a.lon],[b.lat,b.lon]], {
+      color: colourFor(b), weight:5, opacity:.9, lineCap:'round',
+    });
+    line.on('mousemove', e => showHover(v, b, e));
+    line.on('mouseover', e => showHover(v, b, e));
+    line.on('mouseout', hideHover);
+    segs.addLayer(line);
+    b._line = line;
+  }
+  const marker = L.marker([v.points[0].lat, v.points[0].lon], { title:v.vin })
+    .addTo(map).bindPopup(v.vin);
+  return { v, segs, marker };
+});
+
+if (routed.length) {
+  const pts = routed.flatMap(v => v.points.map(p => [p.lat,p.lon]));
+  map.fitBounds(L.latLngBounds(pts).pad(0.25));
+  if (map.getZoom() > 16) map.setZoom(15);
+} else {
+  map.setView([52.1, 5.1], 8);
+}
+
+/* ---------- timeline ---------- */
+// State changes count as timeline events too, so a vehicle that never reports a
+// GPS fix still has a scrubbable history.
+const allTimes = [...new Set(
+  vehicles.flatMap(v => [
+    ...(v.points || []).map(p => p.t),
+    ...Object.values(v.state || {}).flatMap(s => s.v.map(([t]) => t)),
+  ])
+)].sort((a,b) => a-b);
+
+const slider = document.getElementById('slider');
+const clock  = document.getElementById('clock');
+slider.max = Math.max(0, allTimes.length - 1);
+slider.value = slider.max;
+
+const lastAtOrBefore = (arr, t, key = x => x.t) => {
+  let found = null;
+  for (const item of arr) { if (key(item) <= t) found = item; else break; }
+  return found;
+};
+
+/* ---------- state panel ---------- */
+let current = vehicles[0];
+const stateEl = document.getElementById('state');
+const tiles = new Map();
+
+function buildPanel(v) {
+  stateEl.innerHTML = '';
+  tiles.clear();
+  if (!v || !v.state || !Object.keys(v.state).length) {
+    stateEl.innerHTML = '<div class="note">No telemetry recorded for this vehicle yet.</div>';
+    return;
+  }
+  const keys = Object.keys(v.state);
+  const ordered = [
+    ...PRIORITY.filter(k => keys.includes(k)),
+    ...keys.filter(k => !PRIORITY.includes(k)).sort(),
+  ];
+  const byGroup = new Map([['Key readings', []]]);
+  for (const k of ordered) {
+    const g = PRIORITY.includes(k) ? 'Key readings' : groupFor(k);
+    if (!byGroup.has(g)) byGroup.set(g, []);
+    byGroup.get(g).push(k);
+  }
+  for (const [group, groupKeys] of byGroup) {
+    if (!groupKeys.length) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'group';
+    wrap.innerHTML = `<h4>${group}</h4>`;
+    const grid = document.createElement('div');
+    grid.className = 'tiles';
+    for (const k of groupKeys) {
+      const tile = document.createElement('div');
+      tile.className = 'tile';
+      tile.title = k;
+      tile.innerHTML = `<div class="k">${labelFor(k)}</div><div class="v">—</div>`;
+      grid.appendChild(tile);
+      tiles.set(k, tile);
+    }
+    wrap.appendChild(grid);
+    stateEl.appendChild(wrap);
+  }
+}
+
+function paintPanel(v, t) {
+  if (!v?.state) return;
+  for (const [key, tile] of tiles) {
+    const series = v.state[key];
+    const hit = series && lastAtOrBefore(series.v, t, x => x[0]);
+    const valueEl = tile.querySelector('.v');
+    valueEl.textContent = hit ? fmt(hit[1], series.u) : '—';
+    // Grey out anything not yet reported at this point on the timeline.
+    tile.classList.toggle('stale', !hit);
+  }
+}
+
+/* ---------- apply ---------- */
+function apply(idx) {
+  const t = allTimes[idx] ?? allTimes[allTimes.length - 1];
+  clock.textContent = t ? new Date(t).toLocaleString() : '—';
+  for (const { v, marker } of layers) {
+    const p = lastAtOrBefore(v.points, t);
+    if (p) { marker.setLatLng([p.lat, p.lon]); marker.setOpacity(1); }
+    else marker.setOpacity(.25);
+    for (let i = 1; i < v.points.length; i++) {
+      const seg = v.points[i]._line;
+      if (seg) seg.setStyle({ opacity: v.points[i].t <= t ? .9 : .12 });
+    }
+  }
+  paintPanel(current, t);
+}
+
+slider.addEventListener('input', () => apply(+slider.value));
+document.getElementById('end').addEventListener('click', () => {
+  slider.value = slider.max; apply(+slider.max);
+});
+
+let timer = null;
+const play = document.getElementById('play');
+play.addEventListener('click', () => {
+  if (timer) { clearInterval(timer); timer = null; play.textContent = '▶︎ Play'; play.classList.remove('on'); return; }
+  play.textContent = '❚❚ Pause'; play.classList.add('on');
+  timer = setInterval(() => {
+    let next = +slider.value + 1;
+    if (next > +slider.max) next = 0;
+    slider.value = next; apply(next);
+  }, 220);
+});
+
+/* ---------- vehicle switcher ---------- */
+const vehsel = document.getElementById('vehsel');
+vehicles.forEach(v => {
+  const b = document.createElement('button');
+  b.textContent = `${v.label || v.vin.slice(-6)} · ${(v.points || []).length} fixes`;
+  b.title = v.vin;
+  b.addEventListener('click', () => {
+    current = v;
+    [...vehsel.children].forEach(c => c.classList.remove('on'));
+    b.classList.add('on');
+    buildPanel(v);
+    apply(+slider.value);
+  });
+  vehsel.appendChild(b);
+});
+if (vehsel.firstChild) vehsel.firstChild.classList.add('on');
+
+const notes = (DATA?.notes || []).slice();
+if (!vehicles.length) notes.unshift('No telemetry recorded yet.');
+notes.push(`generated ${DATA?.generated ?? '—'}`);
+document.getElementById('notes').textContent = notes.join('  ·  ');
+
+buildPanel(current);
+apply(+slider.value);
+</script>
+</body>
+</html>

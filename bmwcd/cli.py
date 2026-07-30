@@ -1,7 +1,7 @@
 import sys
 from datetime import date, datetime, timedelta
 
-from . import auth, config, db, stream
+from . import auth, config, db, export, stream
 
 USAGE = """usage: python -m bmwcd <command>
 
@@ -11,6 +11,7 @@ USAGE = """usage: python -m bmwcd <command>
   initdb   create the schema (idempotent)
   load     backfill Postgres from the raw JSONL sink (idempotent)
   prune    drop rows and raw files past their retention windows
+  export   render the map page to data/viz/map.html  [--days N]
 """
 
 
@@ -91,6 +92,17 @@ def main(argv: list[str] | None = None) -> int:
                 path.unlink()
                 removed += 1
         print(f"Removed {removed} raw file(s) older than {cfg.raw_retention_days} days.")
+        return 0
+
+    if cmd == "export":
+        days = None
+        if "--days" in sys.argv:
+            days = int(sys.argv[sys.argv.index("--days") + 1])
+        out, data = export.render(cfg, days)
+        fixes = sum(len(v["points"]) for v in data["vehicles"])
+        print(f"Wrote {out} ({len(data['vehicles'])} vehicle(s), {fixes} fixes)")
+        for note in data["notes"]:
+            print(f"  note: {note}")
         return 0
 
     print(USAGE)

@@ -94,6 +94,79 @@ ORDER BY key, ts DESC;
 Raw JSONL stays the source of truth and outlives the database (`raw_retention_days`,
 default 2x), so the DB can be dropped and rebuilt with `load` if the schema changes.
 
+## Map
+
+[![Map preview](docs/screenshot.png)](https://peterkoczan.github.io/bmw-cardata/demo.html)
+
+*Click for the [live demo](https://peterkoczan.github.io/bmw-cardata/demo.html) — invented data, no real vehicle or location.*
+
+```
+python -m bmwcd export [--days N]
+open data/viz/map.html
+```
+
+Regenerate the published preview after changing the template:
+
+```
+python tools/make_demo.py && tools/screenshot.sh
+```
+
+Leaflet page with all data embedded inline, so it works from `file://` without a
+server — a browser will not `fetch()` a sibling JSON file off disk. Time slider
+scrubs the vehicle to where it was at that instant and dims the route ahead of it.
+
+Route colour encodes drivetrain mode: blue electric, red petrol, green
+recuperating, with shade by intensity. Tracing the route with the cursor shows a
+readout of that moment — speed, consumption, charge, fuel, odometer, heading,
+altitude and fix quality. Below the map, a state panel shows every recorded key
+as it stood at the slider's position.
+
+**There is no exact speed in CarData.** BMW withholds it deliberately: "due to
+privacy reasons some functions are not allowed to transmit the current driving
+speed". The only speed signal is `vehicle.vehicle.speedRange.lowerBound` /
+`.upperBound`, so the readout shows a band rather than a number.
+
+**Mode is derived, not measured.** CarData exposes no instantaneous power or
+fuel-flow signal anywhere in the catalogue — every consumption key is a lifetime
+total, a per-trip accumulator or a running average. `avgAuxPower` looks like the
+exception but covers auxiliary load only, not traction. So mode comes from engine
+state, and shade from differencing state of charge or fuel level over the
+distance between consecutive fixes. It is an estimate over a segment, not a
+reading at a point.
+
+Keys that matter, all confirmed streamable:
+
+| Purpose | Key |
+|---|---|
+| State of charge | `vehicle.drivetrain.batteryManagement.header` |
+| Battery capacity | `vehicle.drivetrain.batteryManagement.maxEnergy` |
+| Engine running | `vehicle.drivetrain.engine.isIgnitionOn` / `.isActive` |
+| Fuel | `vehicle.drivetrain.fuelSystem.level` (%), `.remainingFuel` (l) |
+| Charging state | `vehicle.drivetrain.electricEngine.charging.hvStatus` |
+
+Two traps in that list. BMW's catalogue has the *human-readable names* of the two
+engine keys crossed over relative to their key names, so both are consulted and
+either one reporting "running" wins. And `electricEngine.charging.level` looks
+like SoC but is the *predicted* value and is not streamable at all.
+
+Several keys BMW documents as `boolean` actually arrive as `ASN_isTrue` /
+`ASN_isFalse` / `ASN_isUnknown`. The first two are normalised into the `bool`
+column on write; unknown stays text-only, because mapping it to false would
+invent a fact the car never reported.
+
+Position updates depend on the instrument cluster, not the API: Live Cockpit
+Professional emits roughly every 3 minutes or 2 km while moving, Live Cockpit
+Plus only at trip start and end. Expect a coarse polyline either way. Fixes
+reporting `NO_FIX`, null island, or out-of-range coordinates are dropped by the
+`location` view.
+
+## Remote control
+
+There is none. Every CarData endpoint is a `GET` except `POST`/`DELETE` on
+`/customers/containers`, which manages data selection rather than the car. No
+location refresh, no remote functions. Those live on the separate, unofficial
+MyBMW API that `bimmer_connected` speaks.
+
 ## Facts worth not relearning
 
 - MQTT **v5.0**, TLS, port 9000, keep-alive ≤ 30s.
