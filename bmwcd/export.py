@@ -131,6 +131,35 @@ def _mode(prev_t, t, s):
     return out | {"mode": "unknown", "intensity": 0.0}
 
 
+def _state_series(conn, vin: str, since) -> dict:
+    """Every recorded key as a sparse time series, for the state panel.
+
+    Only value *changes* are emitted. Most keys are near-static -- doors, tyre
+    targets, charging limits -- so storing every repeat would inflate the
+    embedded payload by an order of magnitude for no visible difference.
+    """
+    where = "vin=%s" + (" AND ts >= %s" if since else "")
+    args = (vin, since) if since else (vin,)
+    rows = conn.execute(
+        f"SELECT key, ts, num, bool, txt, unit FROM telemetry WHERE {where}"
+        f" ORDER BY key, ts",
+        args,
+    ).fetchall()
+
+    out: dict[str, dict] = {}
+    last: dict[str, object] = {}
+    for key, ts, num, bool_, txt, unit in rows:
+        value = num if num is not None else (bool_ if bool_ is not None else txt)
+        if value is None:
+            continue
+        if key in last and last[key] == value:
+            continue
+        last[key] = value
+        entry = out.setdefault(key, {"u": unit, "v": []})
+        entry["v"].append([int(ts.timestamp() * 1000), value])
+    return out
+
+
 def build(cfg: Config, days: int | None = None) -> dict:
     since = datetime.now().astimezone() - timedelta(days=days) if days else None
     vehicles, notes = [], []
@@ -150,9 +179,8 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 f" FROM location WHERE {where} ORDER BY ts",
                 args,
             ).fetchall()
-            if not fixes:
-                continue
-
+            # A vehicle with telemetry but no GPS fix (a parked i3) still belongs
+            # in the state panel, so carry on with an empty route.
             soc, soc_key = [], None
             for candidate in SOC_CANDIDATES:
                 soc = _series(conn, vin, candidate)
@@ -177,9 +205,11 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 "hv": _series(conn, vin, HV_STATUS, "txt"),
             }
 
+            if not fixes:
+                notes.append(f"{vin}: no location fixes yet, state panel only")
             if soc_key is None:
                 notes.append(f"{vin}: no state-of-charge recorded yet")
-            if not any(s["engine"]):
+            if fixes and not any(s["engine"]):
                 notes.append(
                     f"{vin}: no engine-state recorded yet, so petrol vs electric "
                     f"cannot be separated"
@@ -212,6 +242,7 @@ def build(cfg: Config, days: int | None = None) -> dict:
                     "battery_kwh": battery_kwh,
                     "soc_key": soc_key,
                     "points": points,
+                    "state": _state_series(conn, vin, since),
                 }
             )
 

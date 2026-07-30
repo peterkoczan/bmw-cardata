@@ -96,9 +96,19 @@ default 2x), so the DB can be dropped and rebuilt with `load` if the schema chan
 
 ## Map
 
+[![Map preview](docs/screenshot.png)](https://peterkoczan.github.io/bmw-cardata/demo.html)
+
+*Click for the [live demo](https://peterkoczan.github.io/bmw-cardata/demo.html) — invented data, no real vehicle or location.*
+
 ```
 python -m bmwcd export [--days N]
 open data/viz/map.html
+```
+
+Regenerate the published preview after changing the template:
+
+```
+python tools/make_demo.py && tools/screenshot.sh
 ```
 
 Leaflet page with all data embedded inline, so it works from `file://` without a
@@ -106,7 +116,15 @@ server — a browser will not `fetch()` a sibling JSON file off disk. Time slide
 scrubs the vehicle to where it was at that instant and dims the route ahead of it.
 
 Route colour encodes drivetrain mode: blue electric, red petrol, green
-recuperating, with shade by intensity.
+recuperating, with shade by intensity. Tracing the route with the cursor shows a
+readout of that moment — speed, consumption, charge, fuel, odometer, heading,
+altitude and fix quality. Below the map, a state panel shows every recorded key
+as it stood at the slider's position.
+
+**There is no exact speed in CarData.** BMW withholds it deliberately: "due to
+privacy reasons some functions are not allowed to transmit the current driving
+speed". The only speed signal is `vehicle.vehicle.speedRange.lowerBound` /
+`.upperBound`, so the readout shows a band rather than a number.
 
 **Mode is derived, not measured.** CarData exposes no instantaneous power or
 fuel-flow signal anywhere in the catalogue — every consumption key is a lifetime
