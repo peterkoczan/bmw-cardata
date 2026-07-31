@@ -284,7 +284,26 @@ connected when they look like continuous movement:
 | below this it hasn't moved | 10 m |
 | above this it's a tunnel, not a drive | 2 km |
 
-Trips are listed under the map, click one to zoom to it.
+### Narrowing it down
+
+Two dropdowns under the vehicle row: **Date** and **Trip**.
+
+Pick a date and everything narrows to that day — the map draws only that day's
+fixes, the slider spans only that day, and the trip dropdown drops to the trips
+on it. Pick a trip and it narrows again to that one drive, framed to its own
+bounds, with the summary next to it: distance, duration, average speed, and what
+it cost in kWh or litres.
+
+They were buttons in a row before. That worked with one day of data and stopped
+working the moment there was more — a month of retention is dozens of trips, and
+the row was already scrolling sideways after a single day. **Show all** puts
+everything back, and switching cars clears the filter, since one car's dates mean
+nothing to another.
+
+The date list counts what's on each day, including days where the car never moved
+but still reported something — a charge finishing, a door opening. Those show as
+"state only" and still scrub, because the dashboard has something to say even
+when the map doesn't.
 
 ## The catalogue
 

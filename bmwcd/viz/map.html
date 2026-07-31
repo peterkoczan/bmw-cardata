@@ -52,9 +52,9 @@
 
   /* One line that scrolls, however many cars or trips there are. Wrapping these
      instead would push the dashboard off the bottom of the window. */
-  #vehicles, #trips { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin;
+  #vehicles { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin;
     padding-bottom:2px; }
-  #vehicles > *, #trips > * { flex:0 0 auto; }
+  #vehicles > * { flex:0 0 auto; }
   #vehicles button { font-weight:600; }
   #vehicles button .sub { font-weight:400; opacity:.72; margin-left:7px;
     font-variant-numeric:tabular-nums; }
@@ -72,6 +72,21 @@
      more cars than fit. */
   .vehrow { align-items:center; gap:10px; }
   .rowlabel { flex:0 0 auto; color:var(--muted); font-size:12px; }
+
+  /* Date and trip pickers. Dropdowns rather than a row of buttons: a month of
+     retention is dozens of trips, and that row was already scrolling sideways
+     with one day's worth. */
+  .pickers { gap:8px 14px; }
+  /* Label and its dropdown wrap as one unit -- split, the caption ends up
+     stranded at the end of the line above its own control. */
+  .picker { display:inline-flex; align-items:center; gap:7px; min-width:0;
+    flex:0 1 auto; }
+  .pickers select { flex:0 1 auto; min-width:0; background:var(--tile);
+    color:var(--text); border:1px solid var(--line); border-radius:6px;
+    padding:6px 8px; font:inherit; font-size:13px; cursor:pointer; }
+  .pickers select:disabled { opacity:.5; cursor:default; }
+  .pickers label { cursor:pointer; }
+  #focusnote { font-variant-numeric:tabular-nums; }
 
   #state { flex:1 1 auto; min-height:90px; overflow-y:auto; padding:10px 16px 14px; }
   .group { margin-bottom:12px; }
@@ -111,6 +126,14 @@
       <span class="rowlabel">Vehicles</span>
       <span class="row" id="vehicles"></span>
     </div>
+    <div class="row pickers">
+      <span class="picker"><label class="rowlabel" for="datesel">Date</label>
+        <select id="datesel"></select></span>
+      <span class="picker"><label class="rowlabel" for="tripsel">Trip</label>
+        <select id="tripsel"></select></span>
+      <button id="clearfocus" hidden>Show all</button>
+      <span class="rowlabel" id="focusnote"></span>
+    </div>
     <div class="row">
       <button id="play">▶︎ Play</button>
       <span id="clock">—</span>
@@ -124,7 +147,6 @@
       <span data-mode="unknown"><i class="sw" style="background:#6b7280"></i>unknown</span>
       <span><i class="sw" style="width:9px;height:9px;border-radius:50%;background:#8aa;border:1.5px solid #fff"></i>received fix</span>
     </div>
-    <div class="row" id="trips"></div>
   </div>
   <div id="state"></div>
   <div class="note" id="notes"></div>
@@ -439,7 +461,10 @@ for (const v of vehicles) layers.set(v.vin, buildLayer(v));
 // geometry is real fixes it.
 function fitToVehicle(v) {
   map.invalidateSize();
-  const points = v?.points || [];
+  // Only what is actually drawn: framing a single trip against the whole
+  // month's bounds would leave it a speck in the corner.
+  const all = v?.points || [];
+  const points = all.filter(pointInFocus);
   if (!points.length) { map.setView([52.1, 5.1], 8); return; }
   if (points.length === 1) { map.setView([points[0].lat, points[0].lon], 14); return; }
   // 12%, not 25%: a quarter of the span on every side costs a whole zoom level
@@ -471,10 +496,24 @@ window.addEventListener('resize', () => map.invalidateSize());
 //
 // State changes count as events too, so a car that has never reported a GPS fix
 // still gets a scrubbable history.
-const timesFor = v => [...new Set([
-  ...(v?.points || []).map(p => p.t),
-  ...Object.values(v?.state || {}).flatMap(s => s.v.map(([t]) => t)),
-])].sort((a,b) => a-b);
+// Narrowed by the date/trip pickers when either is set, so the slider spans
+// exactly what is drawn rather than the car's whole history.
+function timesFor(v) {
+  let times = [...new Set([
+    ...(v?.points || []).map(p => p.t),
+    ...Object.values(v?.state || {}).flatMap(s => s.v.map(([t]) => t)),
+  ])].sort((a, b) => a - b);
+
+  if (focus.trip != null) {
+    const t = (v?.trips || []).find(x => x.trip === focus.trip);
+    // Keep the state changes that fall inside the drive, so the dashboard still
+    // moves while scrubbing a single trip.
+    if (t) times = times.filter(x => x >= t.start && x <= t.end);
+  } else if (focus.date) {
+    times = times.filter(x => fmtDate(new Date(x)) === focus.date);
+  }
+  return times;
+}
 
 let allTimes = [];
 const slider = document.getElementById('slider');
@@ -614,25 +653,20 @@ function selectVehicle(v) {
   // nothing is selected at all.
   buttons.get(v.vin)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 
-  // Timeline: this car's own events, so the slider spans its history and not
-  // the union of every car's.
-  allTimes = timesFor(v);
-  slider.max = Math.max(0, allTimes.length - 1);
-  slider.value = slider.max;
-  slider.disabled = allTimes.length < 2;
-
   // A petrol swatch on a car that has never burnt a drop is just noise.
   for (const item of legendEl.querySelectorAll('[data-mode="petrol"]')) {
     item.style.display = v.burns_fuel === false ? 'none' : '';
   }
 
   buildPanel(v);
-  buildTrips(v);
-  apply(+slider.value);
   showNotes(v);
-  // After the frame that lays the new controls out, so the bounds are fitted to
-  // the height the map actually ends up with rather than the one it just had.
-  requestAnimationFrame(() => fitToVehicle(v));
+
+  // Each car has its own dates and trips, so a filter from the previous one
+  // means nothing here. setFocus does the rest: geometry, timeline, and the
+  // deferred fit.
+  focus = { date: null, trip: null };
+  buildDatePicker(v);
+  setFocus({});
 }
 
 function showNotes(v) {
@@ -770,44 +804,170 @@ for (const v of vehicles) {
 // so the row stays.
 if (!vehicles.length) document.querySelector('.vehrow').style.display = 'none';
 
-/* ---------- trips ---------- */
+/* ---------- date and trip pickers ---------- */
 // Position updates stop entirely while parked, so a day's fixes are several
-// separate drives rather than one route. Listing them makes that structure
-// usable instead of implicit.
-const tripsEl = document.getElementById('trips');
+// separate drives rather than one route, and a month of retention is dozens of
+// them across dozens of days. Two dropdowns rather than a row of buttons: the
+// button row was already scrolling sideways with a single day on it.
 
-function buildTrips(v) {
-  tripsEl.innerHTML = '';
-  const trips = (v?.trips || []).filter(t => t.km > 0);
-  if (!trips.length) {
-    tripsEl.innerHTML = '<span class="legend">No completed trips in this window.</span>';
-    return;
+const dateSel = document.getElementById('datesel');
+const tripSel = document.getElementById('tripsel');
+const clearFocusBtn = document.getElementById('clearfocus');
+const focusNote = document.getElementById('focusnote');
+
+// What the page is narrowed to. Both null means the whole history of the
+// selected car; a trip always implies its own date.
+let focus = { date: null, trip: null };
+
+function dayOf(t) { return fmtDate(new Date(t)); }
+
+// Trips are the ones that actually covered ground. A "trip" of 0 km is a burst
+// of parked fixes that the exporter kept as its own group, and offering it here
+// would be offering something with nothing to show.
+const drivenTrips = v => (v?.trips || []).filter(t => t.km > 0);
+
+function daysFor(v) {
+  const days = new Map();
+  const touch = day => days.get(day) ||
+    (days.set(day, { fixes: 0, trips: new Set(), km: 0 }), days.get(day));
+
+  for (const p of v?.points || []) {
+    const e = touch(dayOf(p.t));
+    e.fixes++;
+    e.km += p.km || 0;
   }
-  const label = document.createElement('span');
-  label.className = 'legend';
-  label.textContent = `${trips.length} trip${trips.length > 1 ? 's' : ''}:`;
-  tripsEl.appendChild(label);
+  for (const t of drivenTrips(v)) touch(dayOf(t.start)).trips.add(t.trip);
+  // Days with no fix at all but some state change -- a parked car reporting a
+  // charge finishing is still a day with something on it.
+  for (const s of Object.values(v?.state || {})) {
+    for (const [t] of s.v) touch(dayOf(t));
+  }
+  return [...days.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));  // newest first
+}
 
+function tripSummary(t) {
+  const parts = [`${t.km} km`, `${t.minutes}m`];
+  if (t.avg_kmh != null) parts.push(`${t.avg_kmh} km/h incl. stops`);
+  const a = t.approx ? '~' : '';
+  if (t.kwh_per_100km != null) parts.push(`${a}${t.kwh_per_100km} kWh/100km`);
+  if (t.l_per_100km != null) parts.push(`${a}${t.l_per_100km} l/100km`);
+  if (t.fuel_pct_per_100km != null) parts.push(`${a}${t.fuel_pct_per_100km} %/100km`);
+  return parts.join(' · ');
+}
+
+function option(value, text) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  return o;
+}
+
+function buildDatePicker(v) {
+  const days = daysFor(v);
+  dateSel.replaceChildren(option('', `All dates (${days.length})`));
+  for (const [day, e] of days) {
+    const bits = [];
+    if (e.trips.size) bits.push(`${e.trips.size} trip${e.trips.size > 1 ? 's' : ''}`);
+    if (e.fixes) bits.push(`${e.fixes} fix${e.fixes === 1 ? '' : 'es'}`);
+    if (!bits.length) bits.push('state only');
+    dateSel.appendChild(option(day, `${day} — ${bits.join(', ')}`));
+  }
+  dateSel.value = focus.date || '';
+  dateSel.disabled = !days.length;
+}
+
+function buildTripPicker(v) {
+  // Trips on the chosen day, or every trip when no day is chosen.
+  const trips = drivenTrips(v)
+    .filter(t => !focus.date || dayOf(t.start) === focus.date)
+    .sort((a, b) => a.start - b.start);
+  tripSel.replaceChildren(option('', trips.length
+    ? `All trips (${trips.length})`
+    : 'No trips with distance'));
+  // Without a date filter the list can span days, and a bare "10:54" then does
+  // not say which one. Only worth the extra width when it is actually ambiguous.
+  const spansDays = new Set(trips.map(t => dayOf(t.start))).size > 1;
   for (const t of trips) {
-    const b = document.createElement('button');
-    const when = fmtTime(new Date(t.start));
-    b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
-    if (t.avg_kmh != null) b.textContent += ` · ${t.avg_kmh} km/h incl. stops`;
-    if (t.kwh_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.kwh_per_100km} kWh/100km`;
-    if (t.l_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.l_per_100km} l/100km`;
-    b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
-    b.title = `${fmtDateTime(new Date(t.start))} → ${fmtDateTime(new Date(t.end))}\nmostly ${t.dominant}`;
-    b.addEventListener('click', () => {
-      const pts = v.points.filter(p => p.trip === t.trip).map(p => [p.lat, p.lon]);
-      if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.2));
-      // Scrub to the end of the trip so the panel shows how it finished.
-      const idx = allTimes.findIndex(x => x >= t.end);
-      slider.value = idx < 0 ? slider.max : idx;
-      apply(+slider.value);
-    });
-    tripsEl.appendChild(b);
+    const when = spansDays
+      ? `${dayOf(t.start).slice(5)} ${fmtTime(new Date(t.start))}`
+      : fmtTime(new Date(t.start));
+    tripSel.appendChild(option(
+      String(t.trip),
+      `${when} · ${t.km} km · ${t.minutes}m`,
+    ));
+  }
+  // A trip selected on another day cannot survive the date changing under it.
+  if (focus.trip != null && !trips.some(t => t.trip === focus.trip)) focus.trip = null;
+  tripSel.value = focus.trip == null ? '' : String(focus.trip);
+  tripSel.disabled = !trips.length;
+}
+
+function tripById(v, id) { return (v?.trips || []).find(t => t.trip === id); }
+
+// What is on screen right now, in one line.
+function describeFocus(v) {
+  if (focus.trip != null) {
+    const t = tripById(v, focus.trip);
+    return t ? `${fmtDate(new Date(t.start))} ${fmtTime(new Date(t.start))} — ${tripSummary(t)}`
+             : '';
+  }
+  const trips = drivenTrips(v).filter(t => !focus.date || dayOf(t.start) === focus.date);
+  if (!trips.length) return focus.date ? 'no trips with distance on this date' : '';
+  const km = Math.round(trips.reduce((sum, t) => sum + t.km, 0) * 10) / 10;
+  return `${trips.length} trip${trips.length > 1 ? 's' : ''} · ${km} km total`;
+}
+
+function pointInFocus(p) {
+  if (focus.trip != null) return p.trip === focus.trip;
+  if (focus.date) return dayOf(p.t) === focus.date;
+  return true;
+}
+
+// Layers are added and removed rather than faded to transparent: an invisible
+// polyline still answers the mouse, and a tooltip rising out of blank map for a
+// drive you have filtered away is worse than not filtering at all.
+function applyFocusToGeometry(v) {
+  const group = layers.get(v?.vin);
+  if (!group) return;
+  for (const p of v.points || []) {
+    const want = pointInFocus(p);
+    for (const layer of [p._line, p._dot]) {
+      if (!layer) continue;
+      if (want && !group.hasLayer(layer)) group.addLayer(layer);
+      else if (!want && group.hasLayer(layer)) group.removeLayer(layer);
+    }
   }
 }
+
+function setFocus(next, { rebuildTrips = true } = {}) {
+  focus = { ...focus, ...next };
+  const v = current;
+  if (rebuildTrips) buildTripPicker(v);
+  dateSel.value = focus.date || '';
+  tripSel.value = focus.trip == null ? '' : String(focus.trip);
+
+  applyFocusToGeometry(v);
+  allTimes = timesFor(v);
+  slider.max = Math.max(0, allTimes.length - 1);
+  slider.value = slider.max;
+  slider.disabled = allTimes.length < 2;
+
+  clearFocusBtn.hidden = !focus.date && focus.trip == null;
+  focusNote.textContent = describeFocus(v);
+  hideHover();
+  apply(+slider.value);
+  requestAnimationFrame(() => fitToVehicle(v));
+}
+
+dateSel.addEventListener('change', () => setFocus({ date: dateSel.value || null }));
+tripSel.addEventListener('change', () => {
+  const id = tripSel.value === '' ? null : Number(tripSel.value);
+  // Picking a trip from "All dates" pins the date too, so the two controls
+  // never disagree about what is on screen.
+  const t = id == null ? null : tripById(current, id);
+  setFocus({ trip: id, date: t ? dayOf(t.start) : focus.date }, { rebuildTrips: !!t });
+});
+clearFocusBtn.addEventListener('click', () => setFocus({ date: null, trip: null }));
 
 // Open on whichever car has said something most recently -- that is the one you
 // came to look at. Deferred behind two frames for the same reason fitToVehicle
