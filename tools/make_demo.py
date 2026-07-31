@@ -302,8 +302,16 @@ except Exception:  # noqa: BLE001 - the demo must build without a configured env
 data = {
     "generated": START.isoformat(),
     "vehicles": vehicles,
+    # Published to GitHub Pages, which serves over https -- and the page turns
+    # live polling on for any http(s) origin. Without this flag the demo shows a
+    # "live" badge, asks a static site for stamp.json every 15 seconds, and sits
+    # there greyed out having never reached anything.
+    "static": True,
     "labels": labels,
-    "notes": ["Demo page — invented data, no real vehicle or location"],
+    "notes": [
+        "Demo page — invented data, no real vehicle or location",
+        "run it yourself and the map updates as the car reports, no refreshing",
+    ],
 }
 
 OUT.parent.mkdir(parents=True, exist_ok=True)

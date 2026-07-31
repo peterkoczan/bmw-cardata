@@ -91,6 +91,10 @@
   /* Shown only when the page is served, not when it is opened off disk -- a
      "live" badge on a static snapshot would be a lie. */
   #live { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+  /* An author `display` beats the UA stylesheet's [hidden] { display:none },
+     so setting .hidden on this element does nothing without saying so here.
+     The property reads true while the badge sits there in plain sight. */
+  #live[hidden] { display:none; }
   #live i { width:8px; height:8px; border-radius:50%; background:#22c55e;
     box-shadow:0 0 0 0 #22c55e99; }
   #live.stale i { background:var(--muted); box-shadow:none; }
@@ -1055,10 +1059,14 @@ function ingest(payload, { keep = null } = {}) {
 }
 
 /* ---------- live updates ---------- */
-// Only when the page is served over http. Opened straight off disk it cannot
-// fetch anything -- a file:// origin is opaque -- so it stays the static
-// snapshot it has always been.
-const LIVE = location.protocol === 'http:' || location.protocol === 'https:';
+// Only when there is actually something to poll. Opened off disk the page
+// cannot fetch at all -- a file:// origin is opaque -- but protocol alone is
+// not enough either: the demo is served over https from GitHub Pages, where
+// this showed a live badge, asked for stamp.json every 15 seconds, got a 404
+// every time, and sat there greyed out. A payload that declares itself a
+// snapshot is taken at its word.
+const LIVE = !DATA?.static
+  && (location.protocol === 'http:' || location.protocol === 'https:');
 const POLL_MS = 15000;
 
 async function pollOnce(state) {
