@@ -58,6 +58,20 @@
   #vehicles button { font-weight:600; }
   #vehicles button .sub { font-weight:400; opacity:.72; margin-left:7px;
     font-variant-numeric:tabular-nums; }
+  /* Renamed here rather than in config: marked so a name that disagrees with
+     what the rest of the tooling calls the car is not a silent mystery. */
+  #vehicles button.renamed .name::after { content:'*'; opacity:.55; margin-left:2px; }
+  /* A real input, swapped in for the button while editing. Nesting a
+     contenteditable inside the <button> looks tidier and does not work: the
+     button claims Enter as its own activation and the edit never commits. */
+  input.rename { flex:0 0 auto; background:var(--bg); color:var(--text);
+    border:1px solid #3b82f6; border-radius:6px; padding:6px 10px; font:inherit;
+    font-weight:600; font-size:13px; min-width:90px; }
+
+  /* The row's own caption. Outside the scroller, so it stays put when there are
+     more cars than fit. */
+  .vehrow { align-items:center; gap:10px; }
+  .rowlabel { flex:0 0 auto; color:var(--muted); font-size:12px; }
 
   #state { flex:1 1 auto; min-height:90px; overflow-y:auto; padding:10px 16px 14px; }
   .group { margin-bottom:12px; }
@@ -93,7 +107,10 @@
 <div id="hover"></div>
 <div id="bar">
   <div class="controls">
-    <div class="row" id="vehicles"></div>
+    <div class="row vehrow">
+      <span class="rowlabel">Vehicles</span>
+      <span class="row" id="vehicles"></span>
+    </div>
     <div class="row">
       <button id="play">▶︎ Play</button>
       <span id="clock">—</span>
@@ -621,26 +638,137 @@ function selectVehicle(v) {
 function showNotes(v) {
   const parts = [...(v?.notes || []), ...(DATA?.notes || [])];
   if (!vehicles.length) parts.unshift('No telemetry recorded yet.');
+  const renamed = v && overrideFor(v);
+  if (renamed) {
+    parts.unshift(
+      `“${renamed.name}” is this browser's name for it; everything else still ` +
+      `calls it “${renamed.base}”`
+    );
+  }
   parts.push(`generated ${DATA?.generated ? fmtDateTime(new Date(DATA.generated)) : '—'}`);
   notesEl.textContent = parts.join('  ·  ');
+}
+
+/* ---------- names ---------- */
+// A page opened over file:// cannot write config.toml, so a name typed here is
+// kept in this browser instead. config.toml stays the real store -- the menu bar
+// writes it, the exporter and CLI read it -- and this is a quick override on top
+// for relabelling without leaving the map.
+const NAME_STORE = 'bmwcd.vehicleNames';
+const MAX_NAME = 40;
+
+function readOverrides() {
+  try { return JSON.parse(localStorage.getItem(NAME_STORE)) || {}; }
+  catch { return {}; }  // private mode, or a browser that walls off file://
+}
+const overrides = readOverrides();
+
+function saveOverrides() {
+  try { localStorage.setItem(NAME_STORE, JSON.stringify(overrides)); return true; }
+  catch { return false; }
+}
+
+// Each override remembers the label it replaced. If config.toml later names the
+// car something else, that is a deliberate act and wins -- otherwise a name
+// typed here once would quietly outrank every config change that followed it.
+const exportedLabel = v => v.label || v.vin.slice(-6);
+const overrideFor = v => {
+  const o = overrides[v.vin];
+  return o && o.base === exportedLabel(v) ? o : null;
+};
+const labelOf = v => overrideFor(v)?.name || exportedLabel(v);
+
+// Drop overrides that have been outranked, and ones for cars no longer in the
+// data. Left alone they are harmless but permanent: ignored on every read, and
+// still sitting there years later.
+{
+  const live = new Set(vehicles.map(v => v.vin));
+  let pruned = false;
+  for (const [vin, o] of Object.entries(overrides)) {
+    const v = vehicles.find(x => x.vin === vin);
+    if (!live.has(vin) || o?.base !== exportedLabel(v)) {
+      delete overrides[vin];
+      pruned = true;
+    }
+  }
+  if (pruned) saveOverrides();
+}
+
+function paintButton(v) {
+  const button = buttons.get(v.vin);
+  if (!button) return;
+  const fixes = (v.points || []).length;
+  button.querySelector('.name').textContent = labelOf(v);
+  button.querySelector('.sub').textContent =
+    `${fixes} fix${fixes === 1 ? '' : 'es'} · ${Object.keys(v.state || {}).length} keys`;
+  button.classList.toggle('renamed', !!overrideFor(v));
+  button.title = overrideFor(v)
+    ? `${v.vin}\nRenamed in this browser; config.toml still calls it ` +
+      `"${exportedLabel(v)}".\nDouble-click to change, or clear it to go back.`
+    : `${v.vin}\nDouble-click to rename.`;
+  if (v._marker) v._marker.setPopupContent(`${labelOf(v)} · ${v.vin}`);
+}
+
+function beginRename(v) {
+  const button = buttons.get(v.vin);
+  if (!button || !button.isConnected) return;
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'rename';
+  input.value = labelOf(v);
+  input.maxLength = MAX_NAME;
+  input.title = `Naming ${v.vin}\nEnter saves, Escape cancels, empty resets.`;
+  button.replaceWith(input);
+  input.focus();
+  input.select();
+
+  let done = false;
+  const finish = commit => {
+    if (done) return;
+    done = true;
+    const typed = input.value;
+    input.replaceWith(button);
+
+    if (commit) {
+      const name = typed.replace(/\s+/g, ' ').trim().slice(0, MAX_NAME);
+      // Emptying it, or typing back exactly what config already says, clears the
+      // override rather than storing a redundant copy of it.
+      if (!name || name === exportedLabel(v)) delete overrides[v.vin];
+      else overrides[v.vin] = { name, base: exportedLabel(v) };
+      var stored = saveOverrides();
+    }
+    paintButton(v);
+    if (v === current) showNotes(v);
+    if (commit && !stored) {
+      notesEl.textContent =
+        'Renamed for this session only — this browser would not store it. ' +
+        'Use “Rename vehicle” in the menu bar to make it stick.';
+    }
+  };
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
 }
 
 for (const v of vehicles) {
   const button = document.createElement('button');
   const name = document.createElement('span');
-  name.textContent = v.label || v.vin.slice(-6);
+  name.className = 'name';
   const sub = document.createElement('span');
   sub.className = 'sub';
-  const fixes = (v.points || []).length;
-  sub.textContent = `${fixes} fix${fixes === 1 ? '' : 'es'} · ${Object.keys(v.state || {}).length} keys`;
   button.append(name, sub);
-  button.title = v.vin;
   button.addEventListener('click', () => selectVehicle(v));
+  button.addEventListener('dblclick', e => { e.preventDefault(); beginRename(v); });
   buttons.set(v.vin, button);
   vehiclesEl.appendChild(button);
+  paintButton(v);
 }
-// With one car there is nothing to switch between; the row is only clutter.
-if (vehicles.length < 2) vehiclesEl.style.display = 'none';
+// With one car there is nothing to switch between, but it can still be renamed,
+// so the row stays.
+if (!vehicles.length) document.querySelector('.vehrow').style.display = 'none';
 
 /* ---------- trips ---------- */
 // Position updates stop entirely while parked, so a day's fixes are several
