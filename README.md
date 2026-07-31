@@ -282,13 +282,29 @@ connected when they look like continuous movement:
 |---|---|
 | gap ends a trip | 10 minutes |
 | below this it hasn't moved | 10 m |
-| above this it's a tunnel, not a drive | 2 km |
+| above this speed it's a jump, not a drive | 200 km/h |
+
+That last one used to be a flat 2 km cap on the distance between fixes, and it
+was wrong. BMW's cadence stretches to two minutes on a fast road, so at 110 km/h
+consecutive fixes land 3–4 km apart — perfectly normal driving that the cap read
+as teleporting. One 72 km motorway run came out as **thirteen separate trips**.
+
+Every one of those twelve splits implied between 24 and 109 km/h. So the test is
+the speed a step implies, not its length: a car that appears to have moved at
+200 km/h has jumped, a car that covered 4 km in two minutes has just been driving
+on a motorway.
 
 ### Watching it live
 
 **Open map** from the menu bar now serves the page instead of writing a file,
 and the page updates itself as data arrives. No refreshing. Leave it open on a
 second monitor while you drive and the route extends itself.
+
+The server starts with the indicator, so `http://127.0.0.1:8770/` is always
+there and worth bookmarking — a tab left open overnight picks straight back up.
+It used to start on the first **Open map** click instead, which meant a tab left
+open from yesterday just kept showing yesterday, with nothing on the port to
+poll. Set `map_port = 0` to turn serving off entirely.
 
 ```
 .venv/bin/python -m bmwcd serve [--port N]

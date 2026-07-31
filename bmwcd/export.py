@@ -49,7 +49,18 @@ CHARGE_POWER = "vehicle.powertrain.electric.battery.charging.power"
 # automatically one continuous drive.
 GAP_SPLIT_SECONDS = 600   # silence this long ends a trip
 MIN_STEP_M = 10           # below this the car has not meaningfully moved
-MAX_STEP_M = 2000         # a jump this big is a tunnel catch-up, not a drive
+
+# A jump is a jump because of the speed it implies, not because of its length.
+# This was a flat 2 km cap, which is fine at 30 km/h and nonsense above about
+# 60: BMW's cadence stretches to two minutes on a fast road, so one motorway
+# drive arrived as fixes 2-4 km apart and got shredded into thirteen "trips".
+# Every one of those twelve splits implied between 24 and 109 km/h -- ordinary
+# driving, every time. Speed is the signal that actually distinguishes a
+# post-tunnel catch-up from a car simply going quickly.
+MAX_IMPLIED_KMH = 200
+# Fallback for the degenerate case of two fixes sharing a timestamp, where no
+# speed can be worked out. Far beyond any real gap between consecutive fixes.
+MAX_STEP_M = 20000
 
 # Odometer sanity. BMW has been known to report a km value labelled as miles.
 MAX_ODOMETER_JUMP_KM = 2000
@@ -418,11 +429,21 @@ def build(cfg: Config, days: int | None = None) -> dict:
                         point["speed_kmh"] = round(step_m * 3.6 / gap_s)
                         point["speed_rough"] = gap_s > SPEED_TRUSTWORTHY_GAP_S
 
-                    if gap_s > GAP_SPLIT_SECONDS or step_m > MAX_STEP_M:
+                    # Teleport, rather than a long step: the car could not have
+                    # covered this ground in this time. Distance alone cannot
+                    # tell the two apart, because how far the car gets between
+                    # fixes is set by BMW's cadence as much as by the driving.
+                    implied_kmh = step_m * 3.6 / gap_s if gap_s > 0 else None
+                    teleport = (
+                        implied_kmh > MAX_IMPLIED_KMH if implied_kmh is not None
+                        else step_m > MAX_STEP_M
+                    )
+
+                    if gap_s > GAP_SPLIT_SECONDS or teleport:
                         # A feed gap or a post-tunnel jump. Drawing across it
                         # invents a road that was never travelled and produces a
                         # consumption figure for a distance we did not observe.
-                        if step_m > MAX_STEP_M and gap_s <= GAP_SPLIT_SECONDS:
+                        if teleport and gap_s <= GAP_SPLIT_SECONDS:
                             jumps += 1
                         trip_id += 1
                         point |= {"mode": "start", "intensity": 0.0, "km": 0.0,
@@ -441,7 +462,9 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 prev = point
 
             if jumps:
-                vin_notes.append(f"{jumps} fix(es) jumped >{MAX_STEP_M} m, not drawn")
+                vin_notes.append(
+                    f"{jumps} fix(es) implied over {MAX_IMPLIED_KMH} km/h, not drawn"
+                )
             if stationary:
                 vin_notes.append(f"{stationary} stationary fix(es) below {MIN_STEP_M} m")
 

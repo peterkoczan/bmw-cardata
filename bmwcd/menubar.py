@@ -54,12 +54,19 @@ that step itself.
 Now paste the Client ID below."""
 
 
-def _sh(*args) -> tuple[int, str]:
+def _sh(*args, timeout: float = 15) -> tuple[int, str]:
     try:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=15)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
         return proc.returncode, (proc.stdout + proc.stderr).strip()
     except (subprocess.TimeoutExpired, OSError) as exc:
         return 1, str(exc)
+
+
+# kickstart -k and bootout wait on the job, and the stream agent has a
+# ThrottleInterval of 30s, so launchd will not bring it back before then.
+# Fifteen seconds meant a restart that was working perfectly reported "timed
+# out" every time.
+JOB_CONTROL_TIMEOUT = 45
 
 
 def _launchctl_jobs() -> dict[str, str] | None:
@@ -257,6 +264,14 @@ class App(rumps.App):
             rumps.MenuItem("Open log", callback=self.open_log),
             rumps.MenuItem("Quit indicator", callback=self.quit),
         ]
+        # Serving from launch, so a map tab left open overnight picks straight
+        # up again. Never fatal: no map is a far smaller problem than no
+        # indicator, and the port may simply be taken by an older copy.
+        try:
+            self._ensure_server()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[menubar] map server not started: {exc}")
+
         self.refresh(None)
         rumps.Timer(self.refresh, POLL_SECONDS).start()
 
@@ -272,6 +287,15 @@ class App(rumps.App):
     # ---- display ----------------------------------------------------------
 
     def refresh(self, _):
+        # Report the outcome of a start/stop/restart, which ran on its own
+        # thread. Done here so the notification is raised from the UI thread.
+        pending = getattr(self, "_pending", None)
+        if pending is not None:
+            self._pending = None
+            title, code, out = pending
+            if code != 0:
+                self._note(title, out or "failed")
+
         # Row/key counts are seq scans; only refresh them every few minutes.
         self._ticks = getattr(self, "_ticks", 0) + 1
         st = poll(self.cfg, with_counts=self._ticks % 30 == 1)
@@ -586,44 +610,75 @@ class App(rumps.App):
     # ---- actions ----------------------------------------------------------
 
     def _after(self, title: str, code: int, out: str, expect_pid: bool = False):
-        if code == 0 and expect_pid:
-            # launchd has not necessarily spawned it yet. Refreshing immediately
+        if expect_pid:
+            # launchd has not necessarily spawned it yet. Reporting immediately
             # would show "stopped" right after a successful start, inviting a
             # second click that then fails with "already bootstrapped".
-            for _ in range(6):
+            #
+            # The wait runs even when launchctl reported an error, because that
+            # is exactly when the answer matters: the stream agent throttles for
+            # 30s, kickstart blocks for the duration, and a restart that was
+            # working perfectly used to come back as "timed out".
+            deadline = time.monotonic() + JOB_CONTROL_TIMEOUT
+            while time.monotonic() < deadline:
                 time.sleep(0.5)
                 jobs = _launchctl_jobs()
                 if jobs and jobs.get(LABEL, "-").isdigit():
+                    code, out = 0, ""  # running; whatever launchctl said, it worked
                     break
-        self.refresh(None)  # reflect reality now, not at the next tick
-        if code != 0:
-            self._note(title, out or "failed")
+        self._pending = (title, code, out)  # picked up by the next refresh tick
+
+    def _job_command(self, title: str, args: list[str], expect_pid: bool = False):
+        """Run a launchctl command off the UI thread.
+
+        subprocess.run and the verification wait both block for tens of seconds
+        against a throttled job, and on the main thread that freezes the menu
+        bar itself -- the one part of this app whose entire job is to stay
+        responsive.
+        """
+        def worker():
+            code, out = _sh(*args, timeout=JOB_CONTROL_TIMEOUT)
+            self._after(title, code, out, expect_pid=expect_pid)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def restart(self, _):
         # kickstart -k only works on a loaded job; bootstrap it first if needed.
         if not _is_loaded():
             return self.start(None)
-        code, out = _sh("launchctl", "kickstart", "-k", f"{DOMAIN}/{LABEL}")
-        self._after("Restart failed", code, out, expect_pid=True)
+        self._job_command(
+            "Restart failed",
+            ["launchctl", "kickstart", "-k", f"{DOMAIN}/{LABEL}"],
+            expect_pid=True,
+        )
 
     def stop(self, _):
-        code, out = _sh("launchctl", "bootout", f"{DOMAIN}/{LABEL}")
-        self._after("Stop failed", code, out)
+        self._job_command("Stop failed", ["launchctl", "bootout", f"{DOMAIN}/{LABEL}"])
 
     def start(self, _):
         if not PLIST.exists():
             return self._note("No agent installed", "Run ./launchd/install.sh")
-        code, out = _sh("launchctl", "bootstrap", DOMAIN, str(PLIST))
-        self._after("Start failed", code, out, expect_pid=True)
+        self._job_command(
+            "Start failed",
+            ["launchctl", "bootstrap", DOMAIN, str(PLIST)],
+            expect_pid=True,
+        )
 
     def _ensure_server(self):
-        """Start the local map server on first use, and keep it.
+        """Start the local map server, once, and keep it.
 
-        Started lazily rather than at launch: someone who never opens the map
-        should not have a listening socket, even one bound to loopback.
+        Started when the indicator starts rather than on first use. Lazy was the
+        original design and it produced a quiet trap: a map tab left open from
+        yesterday keeps showing yesterday, because there is nothing on the port
+        to poll until someone happens to click Open map. A loopback socket that
+        is always there costs nothing and removes the whole question.
+
+        Set map_port = 0 in config.toml to turn serving off entirely.
         """
         if getattr(self, "_httpd", None) is not None:
             return self._httpd
+        if not self.cfg or not self.cfg.map_port:
+            return None
         from . import serve
 
         self._httpd = serve.serve(self.cfg, self.cfg.map_port)
