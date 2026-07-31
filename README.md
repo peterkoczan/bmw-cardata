@@ -306,6 +306,12 @@ It used to start on the first **Open map** click instead, which meant a tab left
 open from yesterday just kept showing yesterday, with nothing on the port to
 poll. Set `map_port = 0` to turn serving off entirely.
 
+**The URL is the thing that matters, not the file.** `data/viz/map.html` still
+exists and is still a perfectly good self-contained snapshot, but it is frozen
+at whenever `export` last ran — and it looks identical to a working page, which
+caught me out for half an hour of driving. Open it now and it says so across the
+top, with a link to the live one.
+
 ```
 .venv/bin/python -m bmwcd serve [--port N]
 ```

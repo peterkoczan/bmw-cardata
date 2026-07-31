@@ -88,6 +88,14 @@
   .pickers label { cursor:pointer; }
   #focusnote { font-variant-numeric:tabular-nums; }
 
+  /* The counterpart to the live badge: shown on a saved copy, which changes
+     only when somebody re-runs the exporter and otherwise sits there looking
+     exactly like a working page. */
+  #snapshot { background:#f59e0b1a; border:1px solid #f59e0b55; border-radius:7px;
+    padding:6px 10px; font-size:12.5px; gap:8px; }
+  #snapshot a { color:#7aa2f7; }
+  #snapshot[hidden] { display:none; }
+
   /* Shown only when the page is served, not when it is opened off disk -- a
      "live" badge on a static snapshot would be a lie. */
   #live { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
@@ -142,6 +150,10 @@
 <div id="hover"></div>
 <div id="bar">
   <div class="controls">
+    <div class="row" id="snapshot" hidden>
+      <span id="snapshot-text"></span>
+      <a id="snapshot-link" href="#">Open the live map →</a>
+    </div>
     <div class="row vehrow">
       <span class="rowlabel">Vehicles</span>
       <span class="row" id="vehicles"></span>
@@ -1134,6 +1146,20 @@ function startLive() {
 
 const liveDot = document.getElementById('live');
 liveDot.hidden = !LIVE;
+
+// A saved copy is indistinguishable from a working one until you notice the
+// clock has not moved in an hour. Say so, and say where the live one is -- the
+// demo has no live_url and so gets no banner.
+const snapshotEl = document.getElementById('snapshot');
+if (!LIVE && DATA?.live_url) {
+  document.getElementById('snapshot-text').textContent =
+    `Saved copy — frozen at ${DATA.generated ? fmtDateTime(new Date(DATA.generated)) : '—'}. `
+    + 'It only changes when the exporter is run again.';
+  const link = document.getElementById('snapshot-link');
+  link.href = DATA.live_url;
+  link.textContent = `Open the live map at ${DATA.live_url} →`;
+  snapshotEl.hidden = false;
+}
 
 // Rendered synchronously. This used to sit behind two animation frames, which
 // works right up until the page is opened in a background tab -- rAF callbacks
