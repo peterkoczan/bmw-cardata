@@ -516,6 +516,10 @@ def build(cfg: Config, days: int | None = None) -> dict:
 
     return {
         "generated": datetime.now().astimezone().isoformat(),
+        # Where the live copy lives, so a file:// snapshot can point at it rather
+        # than sit there quietly going out of date. This file only changes when
+        # somebody runs `bmwcd export`, which is not obvious from looking at it.
+        "live_url": f"http://127.0.0.1:{cfg.map_port}/" if cfg.map_port else None,
         "vehicles": vehicles,
         "labels": labels,
         "categories": list(CATEGORY_LABELS.values()),
