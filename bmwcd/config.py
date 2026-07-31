@@ -21,6 +21,9 @@ class Config:
         self.data_dir = data_dir if data_dir.is_absolute() else ROOT / data_dir
         self.dsn: str = raw.get("dsn", "postgresql:///bmwcardata")
         self.retention_days: int = int(raw.get("retention_days", 30))
+        # Local port for the live map, served by the menu bar app on 127.0.0.1.
+        # 0 picks a free one, at the cost of the URL moving between restarts.
+        self.map_port: int = int(raw.get("map_port", 8770))
         # Logs are rotated on size, not age: the stream prints a line per
         # message, so volume tracks how much you drive rather than the calendar.
         self.log_max_mb: float = float(raw.get("log_max_mb", 10))

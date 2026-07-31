@@ -29,9 +29,10 @@ OUT = ROOT / "docs" / "demo.html"
 LAT0, LON0 = 52.3676, 4.9041
 START = datetime(2026, 3, 14, 8, 30, tzinfo=timezone.utc)
 
-# A 40-minute stop partway through, so the preview shows two separate trips
-# rather than one implausible continuous route.
-BREAK_AT, BREAK_MINUTES = 45, 40
+# An overnight stop partway through, so the preview shows two separate trips on
+# two separate days -- one route would be implausible, and one day would leave
+# the date picker with nothing to pick.
+BREAK_AT, BREAK_MINUTES = 45, 22 * 60
 
 
 def series(points, unit, fn):

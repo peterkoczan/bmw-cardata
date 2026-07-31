@@ -52,9 +52,9 @@
 
   /* One line that scrolls, however many cars or trips there are. Wrapping these
      instead would push the dashboard off the bottom of the window. */
-  #vehicles, #trips { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin;
+  #vehicles { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin;
     padding-bottom:2px; }
-  #vehicles > *, #trips > * { flex:0 0 auto; }
+  #vehicles > * { flex:0 0 auto; }
   #vehicles button { font-weight:600; }
   #vehicles button .sub { font-weight:400; opacity:.72; margin-left:7px;
     font-variant-numeric:tabular-nums; }
@@ -72,6 +72,37 @@
      more cars than fit. */
   .vehrow { align-items:center; gap:10px; }
   .rowlabel { flex:0 0 auto; color:var(--muted); font-size:12px; }
+
+  /* Date and trip pickers. Dropdowns rather than a row of buttons: a month of
+     retention is dozens of trips, and that row was already scrolling sideways
+     with one day's worth. */
+  .pickers { gap:8px 14px; }
+  /* Label and its dropdown wrap as one unit -- split, the caption ends up
+     stranded at the end of the line above its own control. */
+  .picker { display:inline-flex; align-items:center; gap:7px; min-width:0;
+    flex:0 1 auto; }
+  .pickers select { flex:0 1 auto; min-width:0; background:var(--tile);
+    color:var(--text); border:1px solid var(--line); border-radius:6px;
+    padding:6px 8px; font:inherit; font-size:13px; cursor:pointer; }
+  .pickers select:disabled { opacity:.5; cursor:default; }
+  .pickers label { cursor:pointer; }
+  #focusnote { font-variant-numeric:tabular-nums; }
+
+  /* Shown only when the page is served, not when it is opened off disk -- a
+     "live" badge on a static snapshot would be a lie. */
+  #live { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+  #live i { width:8px; height:8px; border-radius:50%; background:#22c55e;
+    box-shadow:0 0 0 0 #22c55e99; }
+  #live.stale i { background:var(--muted); box-shadow:none; }
+  #live.pulse i { animation:livepulse 1.1s ease-out 2; }
+  @keyframes livepulse {
+    0%   { box-shadow:0 0 0 0 #22c55eaa; transform:scale(1); }
+    60%  { box-shadow:0 0 0 7px #22c55e00; transform:scale(1.35); }
+    100% { box-shadow:0 0 0 0 #22c55e00; transform:scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #live.pulse i { animation:none; }
+  }
 
   #state { flex:1 1 auto; min-height:90px; overflow-y:auto; padding:10px 16px 14px; }
   .group { margin-bottom:12px; }
@@ -111,6 +142,16 @@
       <span class="rowlabel">Vehicles</span>
       <span class="row" id="vehicles"></span>
     </div>
+    <div class="row pickers">
+      <span class="picker"><label class="rowlabel" for="datesel">Date</label>
+        <select id="datesel"></select></span>
+      <span class="picker"><label class="rowlabel" for="tripsel">Trip</label>
+        <select id="tripsel"></select></span>
+      <button id="clearfocus" hidden>Show all</button>
+      <span class="rowlabel" id="focusnote"></span>
+      <span id="live" class="rowlabel" hidden title="Watching for new data">
+        <i></i>live</span>
+    </div>
     <div class="row">
       <button id="play">▶︎ Play</button>
       <span id="clock">—</span>
@@ -124,13 +165,12 @@
       <span data-mode="unknown"><i class="sw" style="background:#6b7280"></i>unknown</span>
       <span><i class="sw" style="width:9px;height:9px;border-radius:50%;background:#8aa;border:1.5px solid #fff"></i>received fix</span>
     </div>
-    <div class="row" id="trips"></div>
   </div>
   <div id="state"></div>
   <div class="note" id="notes"></div>
 </div>
 <script>
-const DATA = /*__DATA__*/null;
+let DATA = /*__DATA__*/null;
 
 /* ---------- route colouring ---------- */
 const RAMPS = {
@@ -228,7 +268,7 @@ const ENUM_WORDS = {
 // BMW ships display names and categories in its catalogue; prefer those over
 // anything derived from the key path. The fallback only applies when the
 // catalogue has not been fetched.
-const LABELS = DATA?.labels || {};
+let LABELS = DATA?.labels || {};
 const labelFor = key => SHORT_LABELS[key] || LABELS[key]?.n || key.split('.').filter(p => p !== 'vehicle')
   .slice(-2).join(' ')
   .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -383,7 +423,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
   attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:20,
 }).addTo(map);
 
-const vehicles = DATA?.vehicles || [];
+let vehicles = DATA?.vehicles || [];
 
 // One layer group per car, built once and left off the map until its car is
 // selected. Drawing every car at once made two routes in the same town read as
@@ -431,7 +471,11 @@ function buildLayer(v) {
   return group;
 }
 
-for (const v of vehicles) layers.set(v.vin, buildLayer(v));
+function buildAllLayers() {
+  for (const group of layers.values()) map.removeLayer(group);
+  layers.clear();
+  for (const v of vehicles) layers.set(v.vin, buildLayer(v));
+}
 
 // Deferred to after layout: at script-execution time #map can still measure
 // zero, and Leaflet then fits the bounds against nothing and lands on zoom 0 --
@@ -439,7 +483,10 @@ for (const v of vehicles) layers.set(v.vin, buildLayer(v));
 // geometry is real fixes it.
 function fitToVehicle(v) {
   map.invalidateSize();
-  const points = v?.points || [];
+  // Only what is actually drawn: framing a single trip against the whole
+  // month's bounds would leave it a speck in the corner.
+  const all = v?.points || [];
+  const points = all.filter(pointInFocus);
   if (!points.length) { map.setView([52.1, 5.1], 8); return; }
   if (points.length === 1) { map.setView([points[0].lat, points[0].lon], 14); return; }
   // 12%, not 25%: a quarter of the span on every side costs a whole zoom level
@@ -454,6 +501,14 @@ function fitToVehicle(v) {
 // trip button, which is enough to wrap a row and steal ~30px from the map.
 // Leaflet does not watch its container, so without this the pane grows and the
 // bottom strip stays an unpainted black band until the next pan.
+// Run once the browser has laid the page out. requestAnimationFrame is the
+// right signal when the tab is visible and never fires when it is not, so a
+// hidden tab falls back to a task instead of waiting indefinitely.
+function afterLayout(fn) {
+  if (document.visibilityState === 'hidden') setTimeout(fn, 0);
+  else requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
 const mapEl = document.getElementById('map');
 if (window.ResizeObserver) {
   // Inside a frame: calling invalidateSize synchronously from the callback
@@ -471,10 +526,24 @@ window.addEventListener('resize', () => map.invalidateSize());
 //
 // State changes count as events too, so a car that has never reported a GPS fix
 // still gets a scrubbable history.
-const timesFor = v => [...new Set([
-  ...(v?.points || []).map(p => p.t),
-  ...Object.values(v?.state || {}).flatMap(s => s.v.map(([t]) => t)),
-])].sort((a,b) => a-b);
+// Narrowed by the date/trip pickers when either is set, so the slider spans
+// exactly what is drawn rather than the car's whole history.
+function timesFor(v) {
+  let times = [...new Set([
+    ...(v?.points || []).map(p => p.t),
+    ...Object.values(v?.state || {}).flatMap(s => s.v.map(([t]) => t)),
+  ])].sort((a, b) => a - b);
+
+  if (focus.trip != null) {
+    const t = (v?.trips || []).find(x => x.trip === focus.trip);
+    // Keep the state changes that fall inside the drive, so the dashboard still
+    // moves while scrubbing a single trip.
+    if (t) times = times.filter(x => x >= t.start && x <= t.end);
+  } else if (focus.date) {
+    times = times.filter(x => fmtDate(new Date(x)) === focus.date);
+  }
+  return times;
+}
 
 let allTimes = [];
 const slider = document.getElementById('slider');
@@ -614,25 +683,20 @@ function selectVehicle(v) {
   // nothing is selected at all.
   buttons.get(v.vin)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 
-  // Timeline: this car's own events, so the slider spans its history and not
-  // the union of every car's.
-  allTimes = timesFor(v);
-  slider.max = Math.max(0, allTimes.length - 1);
-  slider.value = slider.max;
-  slider.disabled = allTimes.length < 2;
-
   // A petrol swatch on a car that has never burnt a drop is just noise.
   for (const item of legendEl.querySelectorAll('[data-mode="petrol"]')) {
     item.style.display = v.burns_fuel === false ? 'none' : '';
   }
 
   buildPanel(v);
-  buildTrips(v);
-  apply(+slider.value);
   showNotes(v);
-  // After the frame that lays the new controls out, so the bounds are fitted to
-  // the height the map actually ends up with rather than the one it just had.
-  requestAnimationFrame(() => fitToVehicle(v));
+
+  // Each car has its own dates and trips, so a filter from the previous one
+  // means nothing here. setFocus does the rest: geometry, timeline, and the
+  // deferred fit.
+  focus = { date: null, trip: null };
+  buildDatePicker(v);
+  setFocus({});
 }
 
 function showNotes(v) {
@@ -681,7 +745,7 @@ const labelOf = v => overrideFor(v)?.name || exportedLabel(v);
 // Drop overrides that have been outranked, and ones for cars no longer in the
 // data. Left alone they are harmless but permanent: ignored on every read, and
 // still sitting there years later.
-{
+function pruneOverrides() {
   const live = new Set(vehicles.map(v => v.vin));
   let pruned = false;
   for (const [vin, o] of Object.entries(overrides)) {
@@ -753,70 +817,329 @@ function beginRename(v) {
   input.addEventListener('blur', () => finish(true));
 }
 
-for (const v of vehicles) {
-  const button = document.createElement('button');
-  const name = document.createElement('span');
-  name.className = 'name';
-  const sub = document.createElement('span');
-  sub.className = 'sub';
-  button.append(name, sub);
-  button.addEventListener('click', () => selectVehicle(v));
-  button.addEventListener('dblclick', e => { e.preventDefault(); beginRename(v); });
-  buttons.set(v.vin, button);
-  vehiclesEl.appendChild(button);
-  paintButton(v);
+function buildSwitcher() {
+  buttons.clear();
+  vehiclesEl.replaceChildren();
+  for (const v of vehicles) {
+    const button = document.createElement('button');
+    const name = document.createElement('span');
+    name.className = 'name';
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    button.append(name, sub);
+    button.addEventListener('click', () => selectVehicle(v));
+    button.addEventListener('dblclick', e => { e.preventDefault(); beginRename(v); });
+    buttons.set(v.vin, button);
+    vehiclesEl.appendChild(button);
+    paintButton(v);
+  }
+  // With one car there is nothing to switch between, but it can still be
+  // renamed, so the row stays.
+  document.querySelector('.vehrow').style.display = vehicles.length ? '' : 'none';
 }
-// With one car there is nothing to switch between, but it can still be renamed,
-// so the row stays.
-if (!vehicles.length) document.querySelector('.vehrow').style.display = 'none';
 
-/* ---------- trips ---------- */
+/* ---------- date and trip pickers ---------- */
 // Position updates stop entirely while parked, so a day's fixes are several
-// separate drives rather than one route. Listing them makes that structure
-// usable instead of implicit.
-const tripsEl = document.getElementById('trips');
+// separate drives rather than one route, and a month of retention is dozens of
+// them across dozens of days. Two dropdowns rather than a row of buttons: the
+// button row was already scrolling sideways with a single day on it.
 
-function buildTrips(v) {
-  tripsEl.innerHTML = '';
-  const trips = (v?.trips || []).filter(t => t.km > 0);
-  if (!trips.length) {
-    tripsEl.innerHTML = '<span class="legend">No completed trips in this window.</span>';
-    return;
+const dateSel = document.getElementById('datesel');
+const tripSel = document.getElementById('tripsel');
+const clearFocusBtn = document.getElementById('clearfocus');
+const focusNote = document.getElementById('focusnote');
+
+// What the page is narrowed to. Both null means the whole history of the
+// selected car; a trip always implies its own date.
+let focus = { date: null, trip: null };
+
+function dayOf(t) { return fmtDate(new Date(t)); }
+
+// Trips are the ones that actually covered ground. A "trip" of 0 km is a burst
+// of parked fixes that the exporter kept as its own group, and offering it here
+// would be offering something with nothing to show.
+const drivenTrips = v => (v?.trips || []).filter(t => t.km > 0);
+
+function daysFor(v) {
+  const days = new Map();
+  const touch = day => days.get(day) ||
+    (days.set(day, { fixes: 0, trips: new Set(), km: 0 }), days.get(day));
+
+  for (const p of v?.points || []) {
+    const e = touch(dayOf(p.t));
+    e.fixes++;
+    e.km += p.km || 0;
   }
-  const label = document.createElement('span');
-  label.className = 'legend';
-  label.textContent = `${trips.length} trip${trips.length > 1 ? 's' : ''}:`;
-  tripsEl.appendChild(label);
+  for (const t of drivenTrips(v)) touch(dayOf(t.start)).trips.add(t.trip);
+  // Days with no fix at all but some state change -- a parked car reporting a
+  // charge finishing is still a day with something on it.
+  for (const s of Object.values(v?.state || {})) {
+    for (const [t] of s.v) touch(dayOf(t));
+  }
+  return [...days.entries()].sort((a, b) => (a[0] < b[0] ? 1 : -1));  // newest first
+}
 
+function tripSummary(t) {
+  const parts = [`${t.km} km`, `${t.minutes}m`];
+  if (t.avg_kmh != null) parts.push(`${t.avg_kmh} km/h incl. stops`);
+  const a = t.approx ? '~' : '';
+  if (t.kwh_per_100km != null) parts.push(`${a}${t.kwh_per_100km} kWh/100km`);
+  if (t.l_per_100km != null) parts.push(`${a}${t.l_per_100km} l/100km`);
+  if (t.fuel_pct_per_100km != null) parts.push(`${a}${t.fuel_pct_per_100km} %/100km`);
+  return parts.join(' · ');
+}
+
+function option(value, text) {
+  const o = document.createElement('option');
+  o.value = value;
+  o.textContent = text;
+  return o;
+}
+
+function buildDatePicker(v) {
+  const days = daysFor(v);
+  dateSel.replaceChildren(option('', `All dates (${days.length})`));
+  for (const [day, e] of days) {
+    const bits = [];
+    if (e.trips.size) bits.push(`${e.trips.size} trip${e.trips.size > 1 ? 's' : ''}`);
+    if (e.fixes) bits.push(`${e.fixes} fix${e.fixes === 1 ? '' : 'es'}`);
+    if (!bits.length) bits.push('state only');
+    dateSel.appendChild(option(day, `${day} — ${bits.join(', ')}`));
+  }
+  dateSel.value = focus.date || '';
+  dateSel.disabled = !days.length;
+}
+
+function buildTripPicker(v) {
+  // Trips on the chosen day, or every trip when no day is chosen.
+  const trips = drivenTrips(v)
+    .filter(t => !focus.date || dayOf(t.start) === focus.date)
+    .sort((a, b) => a.start - b.start);
+  tripSel.replaceChildren(option('', trips.length
+    ? `All trips (${trips.length})`
+    : 'No trips with distance'));
+  // Without a date filter the list can span days, and a bare "10:54" then does
+  // not say which one. Only worth the extra width when it is actually ambiguous.
+  const spansDays = new Set(trips.map(t => dayOf(t.start))).size > 1;
   for (const t of trips) {
-    const b = document.createElement('button');
-    const when = fmtTime(new Date(t.start));
-    b.textContent = `${when} · ${t.km} km · ${t.minutes}m`;
-    if (t.avg_kmh != null) b.textContent += ` · ${t.avg_kmh} km/h incl. stops`;
-    if (t.kwh_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.kwh_per_100km} kWh/100km`;
-    if (t.l_per_100km != null) b.textContent += ` · ${t.approx ? '~' : ''}${t.l_per_100km} l/100km`;
-    b.style.borderLeft = `4px solid ${RAMPS[t.dominant]?.[1] || '#6b7280'}`;
-    b.title = `${fmtDateTime(new Date(t.start))} → ${fmtDateTime(new Date(t.end))}\nmostly ${t.dominant}`;
-    b.addEventListener('click', () => {
-      const pts = v.points.filter(p => p.trip === t.trip).map(p => [p.lat, p.lon]);
-      if (pts.length) map.fitBounds(L.latLngBounds(pts).pad(0.2));
-      // Scrub to the end of the trip so the panel shows how it finished.
-      const idx = allTimes.findIndex(x => x >= t.end);
-      slider.value = idx < 0 ? slider.max : idx;
-      apply(+slider.value);
-    });
-    tripsEl.appendChild(b);
+    const when = spansDays
+      ? `${dayOf(t.start).slice(5)} ${fmtTime(new Date(t.start))}`
+      : fmtTime(new Date(t.start));
+    tripSel.appendChild(option(
+      String(t.trip),
+      `${when} · ${t.km} km · ${t.minutes}m`,
+    ));
+  }
+  // A trip selected on another day cannot survive the date changing under it.
+  if (focus.trip != null && !trips.some(t => t.trip === focus.trip)) focus.trip = null;
+  tripSel.value = focus.trip == null ? '' : String(focus.trip);
+  tripSel.disabled = !trips.length;
+}
+
+function tripById(v, id) { return (v?.trips || []).find(t => t.trip === id); }
+
+// What is on screen right now, in one line.
+function describeFocus(v) {
+  if (focus.trip != null) {
+    const t = tripById(v, focus.trip);
+    return t ? `${fmtDate(new Date(t.start))} ${fmtTime(new Date(t.start))} — ${tripSummary(t)}`
+             : '';
+  }
+  const trips = drivenTrips(v).filter(t => !focus.date || dayOf(t.start) === focus.date);
+  if (!trips.length) return focus.date ? 'no trips with distance on this date' : '';
+  const km = Math.round(trips.reduce((sum, t) => sum + t.km, 0) * 10) / 10;
+  return `${trips.length} trip${trips.length > 1 ? 's' : ''} · ${km} km total`;
+}
+
+function pointInFocus(p) {
+  if (focus.trip != null) return p.trip === focus.trip;
+  if (focus.date) return dayOf(p.t) === focus.date;
+  return true;
+}
+
+// Layers are added and removed rather than faded to transparent: an invisible
+// polyline still answers the mouse, and a tooltip rising out of blank map for a
+// drive you have filtered away is worse than not filtering at all.
+function applyFocusToGeometry(v) {
+  const group = layers.get(v?.vin);
+  if (!group) return;
+  for (const p of v.points || []) {
+    const want = pointInFocus(p);
+    for (const layer of [p._line, p._dot]) {
+      if (!layer) continue;
+      if (want && !group.hasLayer(layer)) group.addLayer(layer);
+      else if (!want && group.hasLayer(layer)) group.removeLayer(layer);
+    }
   }
 }
 
-// Open on whichever car has said something most recently -- that is the one you
-// came to look at. Deferred behind two frames for the same reason fitToVehicle
-// is: #map has no real height until layout has run.
-const mostRecent = vehicles.slice().sort((a, b) =>
-  (timesFor(b).at(-1) ?? 0) - (timesFor(a).at(-1) ?? 0))[0];
-current = mostRecent || vehicles[0];
-showNotes(current);
-requestAnimationFrame(() => requestAnimationFrame(() => selectVehicle(current)));
+function setFocus(next, { rebuildTrips = true } = {}) {
+  focus = { ...focus, ...next };
+  const v = current;
+  if (rebuildTrips) buildTripPicker(v);
+  dateSel.value = focus.date || '';
+  tripSel.value = focus.trip == null ? '' : String(focus.trip);
+
+  applyFocusToGeometry(v);
+  allTimes = timesFor(v);
+  slider.max = Math.max(0, allTimes.length - 1);
+  slider.value = slider.max;
+  slider.disabled = allTimes.length < 2;
+
+  clearFocusBtn.hidden = !focus.date && focus.trip == null;
+  focusNote.textContent = describeFocus(v);
+  hideHover();
+  apply(+slider.value);
+  afterLayout(() => fitToVehicle(v));
+}
+
+dateSel.addEventListener('change', () => setFocus({ date: dateSel.value || null }));
+tripSel.addEventListener('change', () => {
+  const id = tripSel.value === '' ? null : Number(tripSel.value);
+  // Picking a trip from "All dates" pins the date too, so the two controls
+  // never disagree about what is on screen.
+  const t = id == null ? null : tripById(current, id);
+  setFocus({ trip: id, date: t ? dayOf(t.start) : focus.date }, { rebuildTrips: !!t });
+});
+clearFocusBtn.addEventListener('click', () => setFocus({ date: null, trip: null }));
+
+/* ---------- loading, and reloading ---------- */
+
+// Whichever car has said something most recently -- that is the one you came to
+// look at.
+function mostRecentVehicle() {
+  const stamp = v => Math.max(
+    ...(v.points || []).map(p => p.t),
+    ...Object.values(v.state || {}).flatMap(s => s.v.map(([t]) => t)),
+    0,
+  );
+  return vehicles.slice().sort((a, b) => stamp(b) - stamp(a))[0];
+}
+
+// Swap in a payload and rebuild everything derived from it. Used for the first
+// render and for every live update, so there is one code path rather than two
+// that drift apart.
+function ingest(payload, { keep = null } = {}) {
+  DATA = payload;
+  LABELS = payload?.labels || {};
+  vehicles = payload?.vehicles || [];
+
+  pruneOverrides();
+  buildAllLayers();
+  buildSwitcher();
+
+  const target = (keep && vehicles.find(v => v.vin === keep.vin)) || mostRecentVehicle();
+  current = target || null;
+  showNotes(current);
+  if (!current) return;
+
+  selectVehicle(current);
+  if (!keep) return;
+
+  // Put the view back where the user had it. selectVehicle resets the filter,
+  // which is right when *they* switch cars and wrong when the page reloaded
+  // itself underneath them.
+  const days = new Set([...dateSel.options].map(o => o.value));
+  const date = days.has(keep.date) ? keep.date : null;
+  const trip = keep.trip != null && tripById(current, keep.trip) ? keep.trip : null;
+  if (date || trip != null) setFocus({ date, trip });
+
+  // Scrubbed to a moment: hold that moment. Parked at the end: follow the end,
+  // which is the whole point of leaving the page open.
+  if (!keep.atLatest && keep.t != null) {
+    const idx = allTimes.findIndex(x => x >= keep.t);
+    slider.value = idx < 0 ? slider.max : idx;
+    apply(+slider.value);
+  }
+  if (keep.view) map.setView(keep.view.center, keep.view.zoom, { animate: false });
+}
+
+/* ---------- live updates ---------- */
+// Only when the page is served over http. Opened straight off disk it cannot
+// fetch anything -- a file:// origin is opaque -- so it stays the static
+// snapshot it has always been.
+const LIVE = location.protocol === 'http:' || location.protocol === 'https:';
+const POLL_MS = 15000;
+
+async function pollOnce(state) {
+  const stamp = await (await fetch('stamp.json', { cache: 'no-store' })).json();
+  const key = `${stamp.latest}|${stamp.rows}`;
+  if (key === state.key) return;
+  const first = state.key === null;
+  state.key = key;
+  if (first) return;  // the first poll only establishes the baseline
+
+  const payload = await (await fetch('data.json', { cache: 'no-store' })).json();
+  // Capture where the user is before pulling the rug out.
+  ingest(payload, {
+    keep: {
+      vin: current?.vin,
+      date: focus.date,
+      trip: focus.trip,
+      atLatest: +slider.value === +slider.max,
+      t: allTimes[+slider.value],
+      // Only if they have moved the map themselves; otherwise let the new data
+      // reframe it, so a drive in progress stays in view as it extends.
+      view: state.userMoved ? { center: map.getCenter(), zoom: map.getZoom() } : null,
+    },
+  });
+  flashLive();
+}
+
+function flashLive() {
+  liveDot.classList.remove('pulse');
+  void liveDot.offsetWidth;  // restart the animation rather than ignore it
+  liveDot.classList.add('pulse');
+  liveDot.title = `Updated ${fmtDateTime(new Date())}`;
+}
+
+function startLive() {
+  const state = { key: null, userMoved: false };
+  // Only genuine user gestures pin the view across an update. Listening to
+  // Leaflet's move/zoom events instead would fire on our own fitBounds, so the
+  // view would count as "user-controlled" from the first render onwards and a
+  // drive in progress would never stay framed.
+  const mark = () => { state.userMoved = true; };
+  map.on('dragend', mark);
+  mapEl.addEventListener('wheel', mark, { passive: true });
+  mapEl.addEventListener('dblclick', mark);
+  mapEl.addEventListener('click', e => {
+    if (e.target.closest('.leaflet-control-zoom')) mark();
+  });
+
+  // .then before .catch, not after: a catch handler returns a resolved promise,
+  // so a trailing .then runs on the failure path too and would clear the very
+  // class the catch just set.
+  const tick = () => pollOnce(state)
+    .then(() => liveDot.classList.remove('stale'))
+    // The server is gone (menu bar quit, laptop asleep). Keep trying quietly --
+    // it comes back, and a page full of error text helps nobody.
+    .catch(() => liveDot.classList.add('stale'));
+
+  tick();
+  setInterval(tick, POLL_MS);
+  // Catch up immediately on waking rather than waiting out the interval.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tick();
+  });
+}
+
+const liveDot = document.getElementById('live');
+liveDot.hidden = !LIVE;
+
+// Rendered synchronously. This used to sit behind two animation frames, which
+// works right up until the page is opened in a background tab -- rAF callbacks
+// do not run while a tab is hidden, so the whole page stayed blank until it was
+// brought to the front. Only the map fit needs to wait for layout, and that is
+// deferred on its own inside setFocus.
+ingest(DATA);
+if (LIVE) startLive();
+
+// If the first layout happened while hidden, the map measured nothing. Re-fit
+// once it is actually on screen.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') afterLayout(() => fitToVehicle(current));
+});
 </script>
 </body>
 </html>
