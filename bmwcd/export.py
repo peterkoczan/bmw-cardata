@@ -336,6 +336,8 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 args,
             ).fetchall()
 
+            vin_notes = []
+
             soc, soc_key = Series([]), None
             for candidate in SOC_CANDIDATES:
                 soc = _series(conn, vin, candidate)
@@ -361,14 +363,26 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 "charge_power": _series(conn, vin, CHARGE_POWER),
             }
 
+            # Whether this car burns anything. BMW ships no model name and no
+            # "is a BEV" flag, so the test is whether a fuel reading has ever
+            # been above zero: the i3 reports remainingFuel and lastRemainingRange
+            # as a flat 0, which would otherwise render as "Fuel in tank 0 l"
+            # beside a perfectly good electric range.
+            # A PHEV parked on an empty tank for the whole retention window would
+            # read the same way -- it would lose the fuel tiles until it is
+            # refuelled, which is a better failure than mislabelling every BEV.
+            burns_fuel = any(v and v > 0 for v in s["fuel_pct"].values) or any(
+                v and v > 0 for v in s["fuel_l"].values
+            )
+
             if not fixes:
-                notes.append(f"{vin}: no location fixes yet, state panel only")
+                vin_notes.append("no location fixes yet, state panel only")
             if soc_key is None:
-                notes.append(f"{vin}: no state-of-charge recorded yet")
-            if fixes and not any(s["engine"]):
-                notes.append(
-                    f"{vin}: no engine-state recorded yet, so petrol vs electric "
-                    f"cannot be separated"
+                vin_notes.append("no state-of-charge recorded yet")
+            if fixes and burns_fuel and not any(s["engine"]):
+                vin_notes.append(
+                    "no engine-state recorded yet, so petrol vs electric "
+                    "cannot be separated"
                 )
 
             points, prev = [], None
@@ -427,9 +441,9 @@ def build(cfg: Config, days: int | None = None) -> dict:
                 prev = point
 
             if jumps:
-                notes.append(f"{vin}: {jumps} fix(es) jumped >{MAX_STEP_M} m, not drawn")
+                vin_notes.append(f"{jumps} fix(es) jumped >{MAX_STEP_M} m, not drawn")
             if stationary:
-                notes.append(f"{vin}: {stationary} stationary fix(es) below {MIN_STEP_M} m")
+                vin_notes.append(f"{stationary} stationary fix(es) below {MIN_STEP_M} m")
 
             trips = _trips(points)
             _attribute_trips(points, trips, s)
@@ -448,12 +462,17 @@ def build(cfg: Config, days: int | None = None) -> dict:
             vehicles.append(
                 {
                     "vin": vin,
-                    "label": vin[-6:],
+                    # Whatever config calls it, else the VIN tail. Nothing in the
+                    # feed carries a model name, so an unnamed car still gets a
+                    # stable, unique handle without anyone editing config first.
+                    "label": cfg.names.get(vin) or vin[-6:],
                     "battery_kwh": battery_kwh,
                     "soc_key": soc_key,
+                    "burns_fuel": burns_fuel,
                     "points": points,
                     "trips": trips,
                     "state": _state_series(conn, vin, since),
+                    "notes": vin_notes,
                 }
             )
 

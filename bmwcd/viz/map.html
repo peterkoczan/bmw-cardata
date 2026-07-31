@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>BMW CarData — track</title>
+<!-- Inline, because the page is opened straight off disk: a favicon.ico sibling
+     would 404 on file:// and leave the generic blank-document icon. Our own
+     quartered roundel, deliberately not BMW's -- this repository is public and
+     theirs is a registered trademark. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
@@ -15,16 +20,24 @@
     :root { --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b; --muted:#5b6474; --tile:#f2f4f7; }
   }
   * { box-sizing: border-box; }
+  /* Flex column rather than an absolutely-positioned bar of a fixed height. The
+     bar's contents vary with how many cars there are and how many trips they
+     made, and at 300px the controls alone could eat all of it -- leaving the
+     dashboard 24px tall to show 1400px of tiles. */
   html, body { margin:0; height:100%; overflow:hidden; background:var(--bg); color:var(--text);
     font:14px/1.45 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
-  #map { position:absolute; inset:0 0 var(--barH,300px) 0; background:var(--bg); }
+  body { display:flex; flex-direction:column; }
+  #map { flex:1 1 auto; min-height:120px; background:var(--bg); }
   .leaflet-container { background: var(--bg); }
 
-  #bar { position:absolute; left:0; right:0; bottom:0; height:var(--barH,300px);
-    background:var(--panel); border-top:1px solid var(--line);
-    display:flex; flex-direction:column; }
-  .controls { padding:10px 16px 8px; display:flex; flex-direction:column; gap:7px;
-    border-bottom:1px solid var(--line); }
+  #bar { flex:0 0 auto; max-height:55vh; overflow:hidden; background:var(--panel);
+    border-top:1px solid var(--line); display:flex; flex-direction:column; }
+  /* Natural height, capped -- not proportionally shrinkable. Left shrinkable,
+     flex weighs the dashboard's ~1500px of tiles against these ~130px and
+     squeezes the controls to a sliver while the dashboard keeps hundreds of
+     pixels it does not need. Past the cap the controls scroll instead. */
+  .controls { flex:0 0 auto; max-height:46vh; overflow-y:auto; padding:10px 16px 8px;
+    display:flex; flex-direction:column; gap:7px; border-bottom:1px solid var(--line); }
   .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   #clock { font-variant-numeric:tabular-nums; font-weight:600; min-width:185px; }
   input[type=range] { flex:1; min-width:200px; accent-color:#3b82f6; }
@@ -35,9 +48,18 @@
   .legend { color:var(--muted); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
   .sw { display:inline-block; width:22px; height:8px; border-radius:2px;
     vertical-align:middle; margin-right:5px; }
-  .note { color:var(--muted); font-size:11.5px; padding:0 16px 6px; }
+  .note { flex:0 0 auto; color:var(--muted); font-size:11.5px; padding:0 16px 6px; }
 
-  #state { flex:1; overflow-y:auto; padding:10px 16px 14px; }
+  /* One line that scrolls, however many cars or trips there are. Wrapping these
+     instead would push the dashboard off the bottom of the window. */
+  #vehicles, #trips { flex-wrap:nowrap; overflow-x:auto; scrollbar-width:thin;
+    padding-bottom:2px; }
+  #vehicles > *, #trips > * { flex:0 0 auto; }
+  #vehicles button { font-weight:600; }
+  #vehicles button .sub { font-weight:400; opacity:.72; margin-left:7px;
+    font-variant-numeric:tabular-nums; }
+
+  #state { flex:1 1 auto; min-height:90px; overflow-y:auto; padding:10px 16px 14px; }
   .group { margin-bottom:12px; }
   .group h4 { margin:0 0 6px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
     color:var(--muted); font-weight:600; }
@@ -71,19 +93,19 @@
 <div id="hover"></div>
 <div id="bar">
   <div class="controls">
+    <div class="row" id="vehicles"></div>
     <div class="row">
       <button id="play">▶︎ Play</button>
       <span id="clock">—</span>
       <input type="range" id="slider" min="0" max="0" value="0" step="1">
       <button id="end">Latest</button>
     </div>
-    <div class="row legend">
-      <span><i class="sw" style="background:linear-gradient(90deg,#bfdbfe,#1d4ed8)"></i>electric</span>
-      <span><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol</span>
-      <span><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
-      <span><i class="sw" style="background:#6b7280"></i>unknown</span>
+    <div class="row legend" id="legend">
+      <span data-mode="electric"><i class="sw" style="background:linear-gradient(90deg,#bfdbfe,#1d4ed8)"></i>electric</span>
+      <span data-mode="petrol"><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol</span>
+      <span data-mode="regen"><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
+      <span data-mode="unknown"><i class="sw" style="background:#6b7280"></i>unknown</span>
       <span><i class="sw" style="width:9px;height:9px;border-radius:50%;background:#8aa;border:1.5px solid #fff"></i>received fix</span>
-      <span id="vehsel" class="row"></span>
     </div>
     <div class="row" id="trips"></div>
   </div>
@@ -134,8 +156,18 @@ const PRIORITY = [
   ['vehicle.drivetrain.engine.isIgnitionOn', 'Ignition'],
   ['vehicle.isMoving', 'Moving'],
 ];
-const PRIORITY_KEYS = PRIORITY.map(([k]) => k);
 const SHORT_LABELS = Object.fromEntries(PRIORITY);
+// Readings that only mean anything on a car that burns something. A BEV reports
+// these as a flat zero, so promoting them puts "Fuel in tank 0 l" and "Total
+// range 0 km" next to a perfectly good electric range. They still appear under
+// their own category further down -- demoted, not hidden.
+const FUEL_ONLY = new Set([
+  'vehicle.drivetrain.fuelSystem.level',
+  'vehicle.drivetrain.fuelSystem.remainingFuel',
+  'vehicle.drivetrain.lastRemainingRange',
+]);
+const priorityFor = v =>
+  PRIORITY.map(([k]) => k).filter(k => v?.burns_fuel !== false || !FUEL_ONLY.has(k));
 // The first few get the large treatment -- these are the ones anyone opening
 // the page is actually looking for.
 const PRIMARY_COUNT = 4;
@@ -186,6 +218,16 @@ const labelFor = key => SHORT_LABELS[key] || LABELS[key]?.n || key.split('.').fi
   .replace(/\b\w/g, c => c.toUpperCase());
 const groupFor = key => LABELS[key]?.c || GROUPS[key.split('.')[1]] || 'Other';
 const describeFor = key => LABELS[key]?.d || key;
+// Thin space every three digits, so a 56651 km odometer reads as 56 651. Done by
+// hand rather than with toLocaleString, which would put a comma on one machine
+// and a full stop on the next -- the same reason the dates below are built here.
+const group = n => {
+  const [whole, frac] = String(n).split('.');
+  const sign = whole.startsWith('-') ? '-' : '';
+  const digits = sign ? whole.slice(1) : whole;
+  if (digits.length < 5) return String(n);
+  return sign + digits.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (frac ? '.' + frac : '');
+};
 const fmt = (value, unit, key = '') => {
   if (typeof value === 'boolean') {
     const hit = BOOL_WORDS.find(([re]) => re.test(key));
@@ -201,7 +243,7 @@ const fmt = (value, unit, key = '') => {
   if (typeof value === 'number') {
     // Tyre pressures come in kPa; bar is what anyone actually reads off a gauge.
     if (unit === 'kpa') return (value / 100).toFixed(1) + ' bar';
-    const n = Number.isInteger(value) ? value : Math.round(value * 100) / 100;
+    const n = group(Number.isInteger(value) ? value : Math.round(value * 100) / 100);
     if (!unit || unit === '-') return String(n);
     // Symbols bind tight to the number; worded units keep their space.
     const symbol = { percent: '%', degrees: '°' }[unit];
@@ -325,10 +367,16 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
 }).addTo(map);
 
 const vehicles = DATA?.vehicles || [];
-const routed = vehicles.filter(v => v.points?.length);
 
-const layers = routed.map(v => {
-  const segs = L.layerGroup().addTo(map);
+// One layer group per car, built once and left off the map until its car is
+// selected. Drawing every car at once made two routes in the same town read as
+// one improbable journey, and there is no reason that gets better with five.
+const layers = new Map();
+
+function buildLayer(v) {
+  const group = L.layerGroup();
+  if (!v.points?.length) return group;
+
   for (let i = 1; i < v.points.length; i++) {
     const a = v.points[i-1], b = v.points[i];
     // Only join fixes the exporter judged a real, continuous movement. Skipping
@@ -341,7 +389,7 @@ const layers = routed.map(v => {
     line.on('mousemove', e => showHover(v, b, e));
     line.on('mouseover', e => showHover(v, b, e));
     line.on('mouseout', hideHover);
-    segs.addLayer(line);
+    group.addLayer(line);
     b._line = line;
   }
   // A dot per received fix. Without these a 500 m straight road and an
@@ -355,43 +403,65 @@ const layers = routed.map(v => {
     dot.on('mousemove', e => showHover(v, p, e));
     dot.on('mouseover', e => showHover(v, p, e));
     dot.on('mouseout', hideHover);
-    segs.addLayer(dot);
+    group.addLayer(dot);
     p._dot = dot;
   }
 
-  const marker = L.marker([v.points[0].lat, v.points[0].lon], { title:v.vin })
-    .addTo(map).bindPopup(v.vin);
-  return { v, segs, marker };
-});
+  const marker = L.marker([v.points[0].lat, v.points[0].lon], { title: v.label })
+    .bindPopup(`${v.label} · ${v.vin}`);
+  group.addLayer(marker);
+  v._marker = marker;
+  return group;
+}
 
-// Deferred to after layout. The bar's height comes from a CSS variable, so at
-// script-execution time #map can still measure zero -- Leaflet then fits the
-// bounds against nothing and lands on zoom 0, showing the whole world with the
-// route an invisible speck. invalidateSize() once the geometry is real fixes it.
-function fitToRoute() {
+for (const v of vehicles) layers.set(v.vin, buildLayer(v));
+
+// Deferred to after layout: at script-execution time #map can still measure
+// zero, and Leaflet then fits the bounds against nothing and lands on zoom 0 --
+// the whole world, with the route an invisible speck. invalidateSize() once the
+// geometry is real fixes it.
+function fitToVehicle(v) {
   map.invalidateSize();
-  if (!routed.length) { map.setView([52.1, 5.1], 8); return; }
-  const bounds = L.latLngBounds(routed.flatMap(v => v.points.map(p => [p.lat, p.lon])));
-  map.fitBounds(bounds.pad(0.25));
+  const points = v?.points || [];
+  if (!points.length) { map.setView([52.1, 5.1], 8); return; }
+  if (points.length === 1) { map.setView([points[0].lat, points[0].lon], 14); return; }
+  // 12%, not 25%: a quarter of the span on every side costs a whole zoom level
+  // on a short map pane, which on a town-sized route is the difference between
+  // reading the street names and not.
+  map.fitBounds(L.latLngBounds(points.map(p => [p.lat, p.lon])).pad(0.12));
   if (map.getZoom() > 16) map.setZoom(15);
 }
-requestAnimationFrame(() => requestAnimationFrame(fitToRoute));
+
+// The map pane is whatever the bar leaves it, and the bar's height moves with
+// the selected car: a hybrid adds a petrol swatch to the legend and a second
+// trip button, which is enough to wrap a row and steal ~30px from the map.
+// Leaflet does not watch its container, so without this the pane grows and the
+// bottom strip stays an unpainted black band until the next pan.
+const mapEl = document.getElementById('map');
+if (window.ResizeObserver) {
+  // Inside a frame: calling invalidateSize synchronously from the callback
+  // makes browsers complain about an undelivered-notification loop.
+  new ResizeObserver(() => requestAnimationFrame(() => map.invalidateSize()))
+    .observe(mapEl);
+}
 window.addEventListener('resize', () => map.invalidateSize());
 
 /* ---------- timeline ---------- */
-// State changes count as timeline events too, so a vehicle that never reports a
-// GPS fix still has a scrubbable history.
-const allTimes = [...new Set(
-  vehicles.flatMap(v => [
-    ...(v.points || []).map(p => p.t),
-    ...Object.values(v.state || {}).flatMap(s => s.v.map(([t]) => t)),
-  ])
-)].sort((a,b) => a-b);
+// Per vehicle, not shared. One axis across all cars means the slider is scaled
+// to whichever has the longest history: with 36 fixes over eleven hours on one
+// car and 2 fixes over two minutes on another, the whole of the second car sits
+// in the last pixel of the track and scrubbing it is impossible.
+//
+// State changes count as events too, so a car that has never reported a GPS fix
+// still gets a scrubbable history.
+const timesFor = v => [...new Set([
+  ...(v?.points || []).map(p => p.t),
+  ...Object.values(v?.state || {}).flatMap(s => s.v.map(([t]) => t)),
+])].sort((a,b) => a-b);
 
+let allTimes = [];
 const slider = document.getElementById('slider');
 const clock  = document.getElementById('clock');
-slider.max = Math.max(0, allTimes.length - 1);
-slider.value = slider.max;
 
 const lastAtOrBefore = (arr, t, key = x => x.t) => {
   let found = null;
@@ -411,14 +481,15 @@ function buildPanel(v) {
     stateEl.innerHTML = '<div class="note">No telemetry recorded for this vehicle yet.</div>';
     return;
   }
+  const priority = priorityFor(v);
   const keys = Object.keys(v.state);
   const ordered = [
-    ...PRIORITY_KEYS.filter(k => keys.includes(k)),
-    ...keys.filter(k => !PRIORITY_KEYS.includes(k)).sort(),
+    ...priority.filter(k => keys.includes(k)),
+    ...keys.filter(k => !priority.includes(k)).sort(),
   ];
   const byGroup = new Map([['Key readings', []]]);
   for (const k of ordered) {
-    const g = PRIORITY_KEYS.includes(k) ? 'Key readings' : groupFor(k);
+    const g = priority.includes(k) ? 'Key readings' : groupFor(k);
     if (!byGroup.has(g)) byGroup.set(g, []);
     byGroup.get(g).push(k);
   }
@@ -431,8 +502,8 @@ function buildPanel(v) {
     grid.className = 'tiles';
     for (const k of groupKeys) {
       const tile = document.createElement('div');
-      tile.className = 'tile' + (PRIORITY_KEYS.indexOf(k) > -1
-        && PRIORITY_KEYS.indexOf(k) < PRIMARY_COUNT ? ' primary' : '');
+      tile.className = 'tile' + (priority.indexOf(k) > -1
+        && priority.indexOf(k) < PRIMARY_COUNT ? ' primary' : '');
       tile.title = `${describeFor(k)}\n\n${k}`;
       // textContent, not innerHTML: these labels come verbatim from BMW's
       // public catalogue API and this page is published to GitHub Pages.
@@ -464,22 +535,23 @@ function paintPanel(v, t) {
 }
 
 /* ---------- apply ---------- */
+// Only the selected car: the others are not on the map, and painting their
+// geometry would be work nobody can see.
 function apply(idx) {
   const t = allTimes[idx] ?? allTimes[allTimes.length - 1];
   clock.textContent = t ? fmtDateTime(new Date(t)) : '—';
-  for (const { v, marker } of layers) {
+  const v = current;
+  if (v?._marker) {
     const p = lastAtOrBefore(v.points, t);
-    if (p) { marker.setLatLng([p.lat, p.lon]); marker.setOpacity(1); }
-    else marker.setOpacity(.25);
-    for (let i = 0; i < v.points.length; i++) {
-      const past = v.points[i].t <= t;
-      const seg = v.points[i]._line;
-      if (seg) seg.setStyle({ opacity: past ? .9 : .12 });
-      const dot = v.points[i]._dot;
-      if (dot) dot.setStyle({ opacity: past ? .9 : .1, fillOpacity: past ? 1 : .1 });
-    }
+    if (p) { v._marker.setLatLng([p.lat, p.lon]); v._marker.setOpacity(1); }
+    else v._marker.setOpacity(.25);
   }
-  paintPanel(current, t);
+  for (const p of v?.points || []) {
+    const past = p.t <= t;
+    if (p._line) p._line.setStyle({ opacity: past ? .9 : .12 });
+    if (p._dot) p._dot.setStyle({ opacity: past ? .9 : .1, fillOpacity: past ? 1 : .1 });
+  }
+  paintPanel(v, t);
 }
 
 slider.addEventListener('input', () => apply(+slider.value));
@@ -500,22 +572,75 @@ play.addEventListener('click', () => {
 });
 
 /* ---------- vehicle switcher ---------- */
-const vehsel = document.getElementById('vehsel');
-vehicles.forEach(v => {
-  const b = document.createElement('button');
-  b.textContent = `${v.label || v.vin.slice(-6)} · ${(v.points || []).length} fixes`;
-  b.title = v.vin;
-  b.addEventListener('click', () => {
-    current = v;
-    [...vehsel.children].forEach(c => c.classList.remove('on'));
-    b.classList.add('on');
-    buildPanel(v);
-    buildTrips(v);
-    apply(+slider.value);
-  });
-  vehsel.appendChild(b);
-});
-if (vehsel.firstChild) vehsel.firstChild.classList.add('on');
+// Built from whatever is in the data. Cars are discovered from the telemetry
+// itself, so a new one appears here the first time it streams anything -- no
+// list to maintain, and nothing here assumes there are exactly two.
+const vehiclesEl = document.getElementById('vehicles');
+const legendEl = document.getElementById('legend');
+const notesEl = document.getElementById('notes');
+const buttons = new Map();
+
+function selectVehicle(v) {
+  if (!v) return;
+  const previous = current;
+  current = v;
+
+  // Map: swap which car is drawn, then frame it.
+  if (previous && previous !== v) map.removeLayer(layers.get(previous.vin));
+  const group = layers.get(v.vin);
+  if (group && !map.hasLayer(group)) group.addTo(map);
+  hideHover();
+
+  for (const [vin, button] of buttons) button.classList.toggle('on', vin === v.vin);
+  // With enough cars the row scrolls, and the one that opens by default can be
+  // off the right-hand end -- looking, from the visible buttons alone, as though
+  // nothing is selected at all.
+  buttons.get(v.vin)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+  // Timeline: this car's own events, so the slider spans its history and not
+  // the union of every car's.
+  allTimes = timesFor(v);
+  slider.max = Math.max(0, allTimes.length - 1);
+  slider.value = slider.max;
+  slider.disabled = allTimes.length < 2;
+
+  // A petrol swatch on a car that has never burnt a drop is just noise.
+  for (const item of legendEl.querySelectorAll('[data-mode="petrol"]')) {
+    item.style.display = v.burns_fuel === false ? 'none' : '';
+  }
+
+  buildPanel(v);
+  buildTrips(v);
+  apply(+slider.value);
+  showNotes(v);
+  // After the frame that lays the new controls out, so the bounds are fitted to
+  // the height the map actually ends up with rather than the one it just had.
+  requestAnimationFrame(() => fitToVehicle(v));
+}
+
+function showNotes(v) {
+  const parts = [...(v?.notes || []), ...(DATA?.notes || [])];
+  if (!vehicles.length) parts.unshift('No telemetry recorded yet.');
+  parts.push(`generated ${DATA?.generated ? fmtDateTime(new Date(DATA.generated)) : '—'}`);
+  notesEl.textContent = parts.join('  ·  ');
+}
+
+for (const v of vehicles) {
+  const button = document.createElement('button');
+  const name = document.createElement('span');
+  name.textContent = v.label || v.vin.slice(-6);
+  const sub = document.createElement('span');
+  sub.className = 'sub';
+  const fixes = (v.points || []).length;
+  sub.textContent = `${fixes} fix${fixes === 1 ? '' : 'es'} · ${Object.keys(v.state || {}).length} keys`;
+  button.append(name, sub);
+  button.title = v.vin;
+  button.addEventListener('click', () => selectVehicle(v));
+  buttons.set(v.vin, button);
+  vehiclesEl.appendChild(button);
+}
+// With one car there is nothing to switch between; the row is only clutter.
+if (vehicles.length < 2) vehiclesEl.style.display = 'none';
 
 /* ---------- trips ---------- */
 // Position updates stop entirely while parked, so a day's fixes are several
@@ -556,14 +681,14 @@ function buildTrips(v) {
   }
 }
 
-const notes = (DATA?.notes || []).slice();
-if (!vehicles.length) notes.unshift('No telemetry recorded yet.');
-notes.push(`generated ${DATA?.generated ? fmtDateTime(new Date(DATA.generated)) : '—'}`);
-document.getElementById('notes').textContent = notes.join('  ·  ');
-
-buildPanel(current);
-buildTrips(current);
-apply(+slider.value);
+// Open on whichever car has said something most recently -- that is the one you
+// came to look at. Deferred behind two frames for the same reason fitToVehicle
+// is: #map has no real height until layout has run.
+const mostRecent = vehicles.slice().sort((a, b) =>
+  (timesFor(b).at(-1) ?? 0) - (timesFor(a).at(-1) ?? 0))[0];
+current = mostRecent || vehicles[0];
+showNotes(current);
+requestAnimationFrame(() => requestAnimationFrame(() => selectVehicle(current)));
 </script>
 </body>
 </html>

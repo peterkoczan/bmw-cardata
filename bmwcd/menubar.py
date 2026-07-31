@@ -236,6 +236,8 @@ class App(rumps.App):
         self.item_last = rumps.MenuItem("Last message: …")
         self.item_rows = rumps.MenuItem("Rows: …")
         self.item_retention = rumps.MenuItem("Retention…", callback=self.set_retention)
+        self.item_rename = rumps.MenuItem("Rename vehicle")
+        self._vins: list[str] = []
         self.menu = [
             self.item_stream,
             self.item_db,
@@ -245,6 +247,7 @@ class App(rumps.App):
             rumps.MenuItem("Open map", callback=self.open_map),
             None,
             rumps.MenuItem("Set up / re-authorise…", callback=self.setup),
+            self.item_rename,
             self.item_retention,
             None,
             rumps.MenuItem("Restart stream", callback=self.restart),
@@ -302,6 +305,83 @@ class App(rumps.App):
         self.item_retention.title = (
             f"Retention: {self.cfg.retention_days} days…" if self.cfg else "Retention…"
         )
+        if st.db_up:
+            self._refresh_vehicles()
+
+    # ---- vehicles ---------------------------------------------------------
+
+    def label_for(self, vin: str) -> str:
+        """What to call this car: the configured name, else the VIN tail."""
+        return (self.cfg.names.get(vin) if self.cfg else None) or vin[-6:]
+
+    def _refresh_vehicles(self) -> None:
+        """Keep the rename submenu in step with whatever has actually streamed.
+
+        The VIN list is a grouped scan, so it rides the same slow cadence as the
+        row counts. A car added in the BMW portal shows up here within a few
+        minutes of its first message, with no config editing and no restart.
+        """
+        if self.cfg is None:
+            return
+        if self._ticks % 30 == 1 or not getattr(self, "_vins_loaded", False):
+            try:
+                found = db.vins(self.cfg)
+            except Exception:  # noqa: BLE001 - the indicator must never crash
+                return
+            self._vins_loaded = True
+        else:
+            found = self._vins
+
+        titles = [f"{self.label_for(v)} — {v}" for v in found]
+        if found == self._vins and titles == getattr(self, "_vin_titles", None):
+            return
+        self._vins, self._vin_titles = found, titles
+
+        self.item_rename.clear()
+        if not found:
+            self.item_rename.add(rumps.MenuItem("Nothing has streamed yet"))
+            return
+        for vin, title in zip(found, titles):
+            item = rumps.MenuItem(title, callback=self._rename_vehicle)
+            # rumps identifies a clicked item by its title, which is exactly what
+            # this dialog lets you change; carry the VIN itself instead.
+            item.vin = vin
+            self.item_rename.add(item)
+
+    def _rename_vehicle(self, sender) -> None:
+        vin = getattr(sender, "vin", None)
+        if vin is None or self.cfg is None:
+            return
+        current = self.cfg.names.get(vin, "") if self.cfg else ""
+        window = rumps.Window(
+            message=(
+                f"What to call {vin} on the map.\n\n"
+                "BMW does not stream a model name, so this is the only place a "
+                "car gets a readable label.\n\n"
+                f"Leave it empty to go back to the VIN tail ({vin[-6:]})."
+            ),
+            title="Rename vehicle",
+            default_text=current,
+            ok="Save",
+            cancel="Cancel",
+            dimensions=(220, 24),
+        )
+        response = window.run()
+        if not response.clicked:
+            return
+
+        name = " ".join(response.text.split())
+        try:
+            config.set_name(vin, name)
+        except OSError as exc:
+            return self._note("Could not save the name", str(exc))
+        self.cfg = self._load_config()
+        if self.cfg is None:
+            return self._note("Could not re-read config.toml")
+
+        self._vins_loaded = False  # force the submenu titles to rebuild
+        self.refresh(None)
+        self._note("Renamed", f"{vin} is now {self.label_for(vin)}")
 
     def _show(self, st: "Status") -> None:
         """Coloured roundel when the icons exist, emoji when they do not.
