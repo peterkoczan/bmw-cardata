@@ -74,6 +74,12 @@ FUEL_PCT_PER_100KM = (2.0, 12.0)
 # Below this a whole-kilometre odometer is too coarse to quote a firm figure.
 APPROX_BELOW_KM = 5.0
 
+# Shading for a leg known to be electric but with no measurable consumption --
+# a battery car whose state of charge did not move a whole percent. Deliberately
+# low rather than mid: the ramp means "how heavily", and implying an average
+# would be inventing the very number that is missing.
+ELECTRIC_UNMEASURED_INTENSITY = 0.22
+
 # Derived speed is only close to the truth while the car cannot have gone far
 # off the straight line between two fixes. Past this the figure is still a valid
 # floor, but a weak one, so it is labelled rough rather than quoted plainly.
@@ -235,6 +241,15 @@ def _attribute_trips(points, trips, s):
             per100 = (d_soc / 100.0) * battery / km * 100
             mode, intensity = "electric", _scale(per100, *ELECTRIC_KWH_PER_100KM)
             trip["kwh_per_100km"] = round(per100, 1)
+        elif not s["burns_fuel"]:
+            # A car with no engine cannot have driven on anything else, so the
+            # mode is known even when the consumption is not. State of charge is
+            # whole percent, so a short trip on a big battery moves it by zero
+            # and leaves nothing to measure -- that is a missing *number*, not a
+            # missing answer, and calling it "unknown" threw away something we
+            # are certain of.
+            mode, intensity = "electric", ELECTRIC_UNMEASURED_INTENSITY
+            trip["unmeasured"] = True
 
         # The odometer is whole kilometres, so on a short trip the distance is
         # only good to about +/-1 km -- on this 3 km drive that is a third of the
@@ -259,6 +274,8 @@ def _attribute_trips(points, trips, s):
             leg["mode"] = mode
             leg["intensity"] = intensity
             leg["approx"] = trip["approx"]
+            if trip.get("unmeasured"):
+                leg["unmeasured"] = True
             for field in ("kwh_per_100km", "l_per_100km", "fuel_pct_per_100km"):
                 if field in trip:
                     leg[field] = trip[field]
@@ -268,6 +285,34 @@ def _attribute_trips(points, trips, s):
         if p.get("mode") == "pending":
             p["mode"] = "unknown"
     return by_trip
+
+
+def _burns_fuel(conn, vin: str, combustion_only: set[str]) -> bool:
+    """Does this car have an engine, according to what it has actually sent?
+
+    BMW streams no model name and no drivetrain flag, but its catalogue tags
+    every key with the vehicle types it belongs to, and a key that leaves BEV
+    out only exists on something that burns fuel. So: has this car ever reported
+    one of those keys with a value that means anything?
+
+    The value test is the important half. A battery car still sends
+    `remainingFuel` and `lastRemainingRange` -- as a flat zero -- so presence
+    alone would call every i3 a hybrid. A tank reading of 0 is exactly what a car
+    with no tank has.
+
+    Non-numeric keys count on presence, since there is no zero to compare to.
+    This is derived per car from its own data, so a model nobody here has seen
+    classifies itself the first time it streams.
+    """
+    if not combustion_only:
+        return True  # no catalogue: assume an engine rather than hide fuel
+    row = conn.execute(
+        "SELECT count(*) FROM telemetry"
+        " WHERE vin=%s AND key = ANY(%s)"
+        "   AND (num > 0 OR (num IS NULL AND (bool IS NOT NULL OR txt IS NOT NULL)))",
+        (vin, list(combustion_only)),
+    ).fetchone()
+    return bool(row and row[0])
 
 
 def _state_series(conn, vin: str, since) -> dict:
@@ -330,6 +375,7 @@ def build(cfg: Config, days: int | None = None) -> dict:
     since = datetime.now().astimezone() - timedelta(days=days) if days else None
     vehicles, notes = [], []
     spec = cat.load(cfg)
+    combustion_only = cat.combustion_only_keys(spec)
 
     with db.connect(cfg) as conn:
         vins = [
@@ -363,28 +409,19 @@ def build(cfg: Config, days: int | None = None) -> dict:
                     battery_kwh = found.values[-1]
                     break
 
+            burns_fuel = _burns_fuel(conn, vin, combustion_only)
+
             s = {
                 "dist": _series(conn, vin, DISTANCE),
                 "fuel_pct": _series(conn, vin, FUEL_PCT),
                 "fuel_l": _series(conn, vin, FUEL_LITRES),
                 "soc": soc,
                 "battery_kwh": battery_kwh,
+                "burns_fuel": burns_fuel,
                 "engine": [_series(conn, vin, k, "bool") for k in ENGINE_KEYS],
                 "hv": _series(conn, vin, HV_STATUS, "txt"),
                 "charge_power": _series(conn, vin, CHARGE_POWER),
             }
-
-            # Whether this car burns anything. BMW ships no model name and no
-            # "is a BEV" flag, so the test is whether a fuel reading has ever
-            # been above zero: the i3 reports remainingFuel and lastRemainingRange
-            # as a flat 0, which would otherwise render as "Fuel in tank 0 l"
-            # beside a perfectly good electric range.
-            # A PHEV parked on an empty tank for the whole retention window would
-            # read the same way -- it would lose the fuel tiles until it is
-            # refuelled, which is a better failure than mislabelling every BEV.
-            burns_fuel = any(v and v > 0 for v in s["fuel_pct"].values) or any(
-                v and v > 0 for v in s["fuel_l"].values
-            )
 
             if not fixes:
                 vin_notes.append("no location fixes yet, state panel only")

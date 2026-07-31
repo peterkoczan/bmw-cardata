@@ -513,6 +513,9 @@ function consumptionOf(pt) {
   if (pt.l_per_100km != null) return `${a}${pt.l_per_100km} l/100km`;
   if (pt.fuel_pct_per_100km != null) return `${a}${pt.fuel_pct_per_100km} %/100km`;
   if (pt.kwh != null) return `${pt.kwh} kWh recovered`;
+  // Known to be electric, but the charge did not move a whole percent over this
+  // distance. Saying so beats leaving a blank that reads as an oversight.
+  if (pt.unmeasured) return 'too short to measure';
   return null;
 }
 
@@ -1218,6 +1221,7 @@ function tripSummary(t) {
   if (t.kwh_per_100km != null) parts.push(`${a}${t.kwh_per_100km} kWh/100km`);
   if (t.l_per_100km != null) parts.push(`${a}${t.l_per_100km} l/100km`);
   if (t.fuel_pct_per_100km != null) parts.push(`${a}${t.fuel_pct_per_100km} %/100km`);
+  if (t.unmeasured) parts.push('electric · too short to measure');
   return parts.join(' · ');
 }
 
