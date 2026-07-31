@@ -1,4 +1,5 @@
 import sys
+import time
 from datetime import date, datetime, timedelta
 
 from . import auth, catalogue, config, db, export, logs, stream
@@ -12,6 +13,7 @@ USAGE = """usage: python -m bmwcd <command>
   load     backfill Postgres from the raw JSONL sink (idempotent)
   prune    drop rows and raw files past their retention windows
   export   render the map page to data/viz/map.html  [--days N]
+  serve    serve the live map on 127.0.0.1, updating as data arrives  [--port N]
   catalogue  refresh BMW's telematic data catalogue (public API, no auth)
   menubar  macOS menu bar status indicator and start/stop controls
 """
@@ -132,6 +134,23 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    note: {note}")
         for note in data["notes"]:
             print(f"  note: {note}")
+        return 0
+
+    if cmd == "serve":
+        from . import serve as serve_mod
+
+        port = cfg.map_port
+        if "--port" in argv:
+            port = int(argv[argv.index("--port") + 1])
+        httpd = serve_mod.serve(cfg, port)
+        url = serve_mod.url_for(httpd)
+        print(f"Live map on {url}  (Ctrl-C to stop)")
+        print("Bound to 127.0.0.1 — not reachable from anywhere else.")
+        try:
+            while True:
+                time.sleep(3600)
+        except KeyboardInterrupt:
+            print("\nstopped")
         return 0
 
     print(USAGE)
