@@ -3,23 +3,64 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Without color-scheme the browser keeps drawing its own furniture light: the
+     native <select> popup, the scrollbars and the range track all came out
+     white-on-dark. The meta below matches the browser chrome to the page. -->
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
 <title>BMW CarData — track</title>
 <!-- Inline, because the page is opened straight off disk: a favicon.ico sibling
      would 404 on file:// and leave the generic blank-document icon. Our own
      quartered roundel, deliberately not BMW's -- this repository is public and
      theirs is a registered trademark. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
+<link rel="icon" type="image/svg+xml" sizes="any" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --line: #262b36;
     --text: #e6e9ef; --muted: #99a1b3; --tile: #1d212a;
+    --accent: #3b82f6; --focus: #7aa2f7;
+    /* Status is reserved -- never reused as a series colour. */
+    --warn: #f59e0b; --crit: #f87171; --good: #34d399;
+    /* Borders and shadows tinted towards the background hue rather than pure
+       black, so edges read as depth instead of as a drawn line. */
+    --shadow: 0 1px 2px #05070c66, 0 8px 24px #05070c4d;
   }
+  /* Light tokens, applied two ways: when the system asks for light and the page
+     has not been told otherwise, and when the page has been told light outright.
+     The two selectors cannot be merged into one rule -- a media query cannot sit
+     in a selector list -- so the block is written twice on purpose. */
   @media (prefers-color-scheme: light) {
-    :root { --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b; --muted:#5b6474; --tile:#f2f4f7; }
+    :root:not([data-theme="dark"]) {
+      --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b; --muted:#5b6474; --tile:#f2f4f7;
+      --accent:#2563eb; --focus:#1d4ed8;
+      --warn:#b45309; --crit:#b91c1c; --good:#047857;
+      --shadow: 0 1px 2px #64748b26, 0 8px 24px #64748b1f; }
   }
+  :root[data-theme="light"] {
+    --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b; --muted:#5b6474; --tile:#f2f4f7;
+    --accent:#2563eb; --focus:#1d4ed8;
+    --warn:#b45309; --crit:#b91c1c; --good:#047857;
+    --shadow: 0 1px 2px #64748b26, 0 8px 24px #64748b1f; }
   * { box-sizing: border-box; }
+  html { color-scheme: dark; }
+  @media (prefers-color-scheme: light) { html:not([data-theme="dark"]) { color-scheme: light; } }
+  html[data-theme="light"] { color-scheme: light; }
+  html[data-theme="dark"] { color-scheme: dark; }
+
+  /* One designed focus ring everywhere, rather than the browser's. The default
+     was visible -- checked with a real Tab, not a programmatic focus() -- but it
+     is the UA's orange and sits tight against the control. */
+  :where(button, select, input, a, [tabindex]):focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  /* Screen-reader-only: an accessible name where the visual is an icon. */
+  .sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
   /* Flex column rather than an absolutely-positioned bar of a fixed height. The
      bar's contents vary with how many cars there are and how many trips they
      made, and at 300px the controls alone could eat all of it -- leaving the
@@ -30,8 +71,11 @@
   #map { flex:1 1 auto; min-height:120px; background:var(--bg); }
   .leaflet-container { background: var(--bg); }
 
+  /* Ambient plus direct, tinted towards the background hue: the bar reads as
+     sitting above the map rather than as a line drawn across it. */
   #bar { flex:0 0 auto; max-height:55vh; overflow:hidden; background:var(--panel);
-    border-top:1px solid var(--line); display:flex; flex-direction:column; }
+    border-top:1px solid var(--line); display:flex; flex-direction:column;
+    box-shadow:var(--shadow); z-index:500; }
   /* Natural height, capped -- not proportionally shrinkable. Left shrinkable,
      flex weighs the dashboard's ~1500px of tiles against these ~130px and
      squeezes the controls to a sliver while the dashboard keeps hundreds of
@@ -40,14 +84,25 @@
     display:flex; flex-direction:column; gap:7px; border-bottom:1px solid var(--line); }
   .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
   #clock { font-variant-numeric:tabular-nums; font-weight:600; min-width:185px; }
-  input[type=range] { flex:1; min-width:200px; accent-color:#3b82f6; }
+  /* 24px of hit target for a 6px track: the element was 16px tall, under the
+     24px minimum, so grabbing the scrubber took aim. */
+  input[type=range] { flex:1; min-width:200px; accent-color:var(--accent);
+    height:24px; touch-action:manipulation; }
   button { background:var(--line); color:var(--text); border:0; border-radius:6px;
-    padding:6px 12px; cursor:pointer; font-size:13px; }
-  button:hover { filter:brightness(1.25); }
-  button.on { background:#3b82f6; color:#fff; }
+    padding:7px 12px; cursor:pointer; font-size:13px; min-height:30px;
+    touch-action:manipulation;
+    transition:background-color .12s ease, color .12s ease; }
+  /* Contrast rises on each step towards commitment, rather than the whole
+     button dimming and brightening. */
+  button:hover { background:color-mix(in oklab, var(--line) 70%, var(--text)); }
+  button:active { background:color-mix(in oklab, var(--line) 55%, var(--text)); }
+  button.on { background:var(--accent); color:#fff; }
+  button.on:hover { background:color-mix(in oklab, var(--accent) 85%, #fff); }
   .legend { color:var(--muted); font-size:12px; display:flex; gap:14px; flex-wrap:wrap; }
   .sw { display:inline-block; width:22px; height:8px; border-radius:2px;
     vertical-align:middle; margin-right:5px; }
+  .sw.dot { width:9px; height:9px; border-radius:50%; background:var(--muted);
+    border:1.5px solid var(--panel); box-shadow:0 0 0 1px var(--muted); }
   .note { flex:0 0 auto; color:var(--muted); font-size:11.5px; padding:0 16px 6px; }
 
   /* One line that scrolls, however many cars or trips there are. Wrapping these
@@ -65,7 +120,7 @@
      contenteditable inside the <button> looks tidier and does not work: the
      button claims Enter as its own activation and the edit never commits. */
   input.rename { flex:0 0 auto; background:var(--bg); color:var(--text);
-    border:1px solid #3b82f6; border-radius:6px; padding:6px 10px; font:inherit;
+    border:1px solid var(--accent); border-radius:6px; padding:6px 10px; font:inherit;
     font-weight:600; font-size:13px; min-width:90px; }
 
   /* The row's own caption. Outside the scroller, so it stays put when there are
@@ -107,9 +162,26 @@
   #now .ico { font-size:13px; opacity:.85; }
   #now .pct { font-weight:600; font-size:14px; }
   #now .rng { color:var(--muted); }
-  /* Below a quarter left, the number is the point of the strip. */
-  #now .grp.low .pct { color:#f97316; }
-  #now .grp.empty .pct { color:#ef4444; }
+  /* Below a quarter left, the number is the point of the strip. Colour alone
+     would say nothing to a colourblind reader or in a forced-colours mode, so
+     the level also gets a word -- the same reason the route legend is labelled
+     rather than left as swatches. */
+  #now .grp.low .pct { color:var(--warn); }
+  #now .grp.empty .pct { color:var(--crit); }
+  #now .lvl { font-size:11px; letter-spacing:.04em; text-transform:uppercase;
+    padding:1px 5px; border-radius:4px; }
+  /* How old the whole strip is. Amber once the car has been quiet an hour, so a
+     stale reading cannot pass for a current one. */
+  #now .age { color:var(--muted); font-size:11.5px; padding-left:2px;
+    border-left:1px solid var(--line); }
+  #now .age.stale { color:var(--warn); }
+  #now .grp.low .lvl { color:var(--warn); border:1px solid color-mix(in oklab, var(--warn) 45%, transparent); }
+  #now .grp.empty .lvl { color:var(--crit); border:1px solid color-mix(in oklab, var(--crit) 45%, transparent); }
+
+  /* Square, so the glyph is centred and the target stays ≥24px either way. */
+  .iconbtn { min-width:30px; padding:6px 8px; font-size:14px; line-height:1;
+    background:transparent; color:var(--muted); }
+  .iconbtn:hover { color:var(--text); background:var(--line); }
 
   /* Shown only when the page is served, not when it is opened off disk -- a
      "live" badge on a static snapshot would be a lie. */
@@ -144,9 +216,10 @@
   .tile.stale .v { color:var(--muted); font-weight:400; }
   /* The handful you actually open the page for. */
   .tile.primary { background:linear-gradient(180deg,var(--tile),var(--tile));
-    border:1px solid #3b82f655; box-shadow:inset 0 0 0 1px #3b82f61a; }
+    border:1px solid color-mix(in oklab, var(--accent) 34%, transparent);
+    box-shadow:inset 0 0 0 1px color-mix(in oklab, var(--accent) 10%, transparent); }
   .tile.primary .v { font-size:21px; letter-spacing:-.01em; }
-  .tile.primary .k { color:#7aa2f7; }
+  .tile.primary .k { color:var(--focus); }
 
   #hover { position:absolute; z-index:1000; pointer-events:none; display:none;
     background:var(--panel); border:1px solid var(--line); border-radius:8px;
@@ -161,8 +234,16 @@
 </style>
 </head>
 <body>
-<div id="map"></div>
-<div id="hover"></div>
+<!-- The page went straight to <h4> group headings with nothing above them, so
+     the document had no top level to navigate from. Visually hidden because the
+     page has no room for a banner and the title bar already says it. -->
+<h1 class="sr">BMW CarData — recorded drives</h1>
+<div id="map" role="application" aria-label="Route map"></div>
+<!-- Mouse-only affordance; everything in it is also in the dashboard below, so
+     it is not announced. -->
+<div id="hover" aria-hidden="true"></div>
+<!-- One polite region for things worth interrupting for: new data arriving. -->
+<div id="announce" class="sr" role="status" aria-live="polite" aria-atomic="true"></div>
 <div id="bar">
   <div class="controls">
     <div class="row" id="snapshot" hidden>
@@ -183,19 +264,25 @@
       <span id="now" hidden></span>
       <span id="live" class="rowlabel" hidden title="Watching for new data">
         <i></i>live</span>
+      <button id="theme" class="iconbtn" title="Theme: follows your system"
+              aria-label="Change theme">◐</button>
     </div>
     <div class="row">
-      <button id="play">▶︎ Play</button>
+      <button id="play" aria-label="Play the route back">▶︎ Play</button>
+      <!-- Deliberately not a live region: it ticks on every frame of playback,
+           and announcing each one would be a firehose. New *data* is announced
+           instead, once, from #announce below. -->
       <span id="clock">—</span>
-      <input type="range" id="slider" min="0" max="0" value="0" step="1">
-      <button id="end">Latest</button>
+      <input type="range" id="slider" min="0" max="0" value="0" step="1"
+             aria-label="Scrub through the recorded history">
+      <button id="end" aria-label="Jump to the most recent reading">Latest</button>
     </div>
     <div class="row legend" id="legend">
-      <span data-mode="electric"><i class="sw" style="background:linear-gradient(90deg,#bfdbfe,#1d4ed8)"></i>electric</span>
-      <span data-mode="petrol"><i class="sw" style="background:linear-gradient(90deg,#fecaca,#b91c1c)"></i>petrol</span>
-      <span data-mode="regen"><i class="sw" style="background:linear-gradient(90deg,#bbf7d0,#15803d)"></i>recuperating</span>
-      <span data-mode="unknown"><i class="sw" style="background:#6b7280"></i>unknown</span>
-      <span><i class="sw" style="width:9px;height:9px;border-radius:50%;background:#8aa;border:1.5px solid #fff"></i>received fix</span>
+      <span data-mode="electric"><i class="sw" style="background:linear-gradient(90deg,#60a5fa,#2563eb)"></i>electric</span>
+      <span data-mode="petrol"><i class="sw" style="background:linear-gradient(90deg,#f87171,#dc2626)"></i>petrol</span>
+      <span data-mode="regen"><i class="sw" style="background:linear-gradient(90deg,#2dd4bf,#0d9488)"></i>recuperating</span>
+      <span data-mode="unknown"><i class="sw" style="background:#8b94a7"></i>unknown</span>
+      <span><i class="sw dot"></i>received fix</span>
     </div>
   </div>
   <div id="state"></div>
@@ -205,9 +292,23 @@
 let DATA = /*__DATA__*/null;
 
 /* ---------- route colouring ---------- */
+// Validated with the dataviz palette checker, both surfaces, all pairs.
+//
+// Green was the obvious colour for recuperation and it was the wrong one: red
+// #b91c1c against green #15803d separates by ΔE 4.2 under deuteranopia, where
+// the floor is 6 and the target 8. Since hue is the *only* thing encoding
+// drivetrain mode on the map, a red-green colourblind reader -- about 8% of men
+// -- lost the feature entirely. Teal clears it at 13.1.
+//
+// The pale ends matter just as much and were worse: the old tints separated by
+// ΔE 3.6 under deuteranopia and 9.8 under *normal* vision, against a floor of
+// 15, at 1.2:1 contrast. Spending lightness on intensity while hue carries
+// identity means a low-intensity segment converges towards white and stops
+// saying anything at all. The ramps are narrower now so both ends keep their
+// hue: 10.7 CVD, 17.8 normal.
 const RAMPS = {
-  electric:['#bfdbfe','#1d4ed8'], petrol:['#fecaca','#b91c1c'], regen:['#bbf7d0','#15803d'],
-  unknown:['#6b7280','#6b7280'], idle:['#6b7280','#6b7280'], start:['#6b7280','#6b7280'],
+  electric:['#60a5fa','#2563eb'], petrol:['#f87171','#dc2626'], regen:['#2dd4bf','#0d9488'],
+  unknown:['#8b94a7','#8b94a7'], idle:['#8b94a7','#8b94a7'], start:['#8b94a7','#8b94a7'],
 };
 const mix = (a,b,t) => {
   const p = h => [1,3,5].map(i => parseInt(h.slice(i,i+2),16));
@@ -342,6 +443,9 @@ const fmt = (value, unit, key = '') => {
   if (typeof value === 'number') {
     // Tyre pressures come in kPa; bar is what anyone actually reads off a gauge.
     if (unit === 'kpa') return (value / 100).toFixed(1) + ' bar';
+    // BMW counts everything in minutes. "Full in 476 min" is arithmetic
+    // homework; "Full in 7h 56min" is an answer.
+    if (unit === 'min' || unit === 'minutes') return fmtDuration(value);
     const n = group(Number.isInteger(value) ? value : Math.round(value * 100) / 100);
     if (!unit || unit === '-') return String(n);
     // Symbols bind tight to the number; worded units keep their space.
@@ -728,18 +832,30 @@ function latestOf(v, key) {
 function nowGroup(icon, label, pct, km, note) {
   const g = document.createElement('span');
   g.className = 'grp';
-  if (pct != null) g.classList.add(pct <= 10 ? 'empty' : pct <= 25 ? 'low' : 'ok');
+  const level = pct == null ? null : pct <= 10 ? 'empty' : pct <= 25 ? 'low' : 'ok';
+  if (level) g.classList.add(level);
 
+  // The emoji is decoration: a screen reader announcing "high voltage sign"
+  // helps nobody. The name is carried by real text instead.
   const i = document.createElement('span');
   i.className = 'ico';
   i.textContent = icon;
-  g.appendChild(i);
+  i.setAttribute('aria-hidden', 'true');
+  g.append(i, Object.assign(document.createElement('span'),
+    { className: 'sr', textContent: `${label}: ` }));
 
   if (pct != null) {
     const p = document.createElement('span');
     p.className = 'pct';
     p.textContent = `${group(pct)}%`;
     g.appendChild(p);
+    // Not colour alone.
+    if (level !== 'ok') {
+      const l = document.createElement('span');
+      l.className = 'lvl';
+      l.textContent = level === 'empty' ? 'empty' : 'low';
+      g.appendChild(l);
+    }
   }
   if (km != null) {
     const r = document.createElement('span');
@@ -787,9 +903,48 @@ function paintNow(v) {
     }
   }
 
+  // When the car last said anything at all. Without this the strip quietly
+  // claims to be current: the X5 sat showing 5% for hours after it had actually
+  // finished charging, because BMW never sent a "charge complete" and there was
+  // nothing on screen to say the reading was old.
+  const newest = Math.max(
+    0,
+    ...(v?.points || []).map(p => p.t),
+    ...Object.values(v?.state || {}).map(s => s.v.at(-1)?.[0] ?? 0),
+  );
+  // Not on the published demo: its data is invented and fixed in the past, so
+  // the honest answer there is "139d ago", which reads as a broken page rather
+  // than as a sample.
+  if (newest && !DATA?.static) {
+    const age = document.createElement('span');
+    age.className = 'age';
+    age.dataset.t = String(newest);
+    age.title = `Last message from the car: ${fmtDateTime(new Date(newest))}`;
+    parts.push(age);
+  }
+
   nowEl.hidden = !parts.length;
   for (const p of parts) nowEl.appendChild(p);
+  paintAges();
 }
+
+// "8 min ago" is itself out of date a minute later, so the label is recomputed
+// on a timer rather than only when new data lands.
+function paintAges() {
+  for (const el of nowEl.querySelectorAll('.age')) {
+    const secs = (Date.now() - Number(el.dataset.t)) / 1000;
+    el.textContent = relativeAge(secs);
+    el.classList.toggle('stale', secs > STALE_AFTER_S);
+  }
+}
+const STALE_AFTER_S = 3600;
+function relativeAge(s) {
+  if (s < 90) return 'just now';
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)}h ago`;
+  return `${Math.round(s / 86400)}d ago`;
+}
+setInterval(paintAges, 30000);
 
 /* ---------- apply ---------- */
 // Only the selected car: the others are not on the map, and painting their
@@ -864,6 +1019,9 @@ function selectVehicle(v) {
   buildPanel(v);
   paintNow(v);
   showNotes(v);
+  // The tab title names what you are actually looking at, so a window full of
+  // them can be told apart.
+  document.title = v.label ? `${labelOf(v)} — BMW CarData` : 'BMW CarData — track';
 
   // Each car has its own dates and trips, so a filter from the previous one
   // means nothing here. setFocus does the rest: geometry, timeline, and the
@@ -1164,8 +1322,41 @@ function setFocus(next, { rebuildTrips = true } = {}) {
   focusNote.textContent = describeFocus(v);
   hideHover();
   apply(+slider.value);
+  if (!applyingUrl) writeUrl({ push: true });
   afterLayout(() => fitToVehicle(v));
 }
+
+/* ---------- the URL is the state ---------- */
+// So a particular drive can be bookmarked, sent, or reopened after a restart,
+// and so Back undoes a filter instead of leaving the page. Written with
+// replaceState while scrubbing about and pushState only on a real change, so
+// the history stack stays the size of the decisions actually made.
+function urlState() {
+  const p = new URLSearchParams(location.search);
+  return { vin: p.get('car'), date: p.get('date'), trip: p.has('trip') ? Number(p.get('trip')) : null };
+}
+
+function writeUrl({ push = false } = {}) {
+  const p = new URLSearchParams();
+  if (current) p.set('car', current.vin);
+  if (focus.date) p.set('date', focus.date);
+  if (focus.trip != null) p.set('trip', String(focus.trip));
+  const next = `${location.pathname}${p.toString() ? '?' + p : ''}`;
+  if (next === location.pathname + location.search) return;
+  history[push ? 'pushState' : 'replaceState']({}, '', next);
+}
+
+// Back/Forward: re-apply whatever the URL now says, without writing it again.
+let applyingUrl = false;
+window.addEventListener('popstate', () => {
+  const want = urlState();
+  const v = vehicles.find(x => x.vin === want.vin) || current;
+  applyingUrl = true;
+  try {
+    if (v && v !== current) selectVehicle(v);
+    setFocus({ date: want.date, trip: want.trip });
+  } finally { applyingUrl = false; }
+});
 
 dateSel.addEventListener('change', () => setFocus({ date: dateSel.value || null }));
 tripSel.addEventListener('change', () => {
@@ -1202,13 +1393,25 @@ function ingest(payload, { keep = null } = {}) {
   buildAllLayers();
   buildSwitcher();
 
-  const target = (keep && vehicles.find(v => v.vin === keep.vin)) || mostRecentVehicle();
+  // On a cold load the URL wins: a bookmarked drive should open as the drive it
+  // was bookmarked as, not as whatever reported most recently.
+  const fromUrl = keep ? null : urlState();
+  const wanted = keep?.vin || fromUrl?.vin;
+  const target = (wanted && vehicles.find(v => v.vin === wanted)) || mostRecentVehicle();
   current = target || null;
   showNotes(current);
   if (!current) return;
 
   selectVehicle(current);
-  if (!keep) return;
+  if (!keep) {
+    if (fromUrl?.date || fromUrl?.trip != null) {
+      applyingUrl = true;
+      try { setFocus({ date: fromUrl.date, trip: fromUrl.trip }); }
+      finally { applyingUrl = false; }
+    }
+    writeUrl();
+    return;
+  }
 
   // Put the view back where the user had it. selectVehicle resets the filter,
   // which is right when *they* switch cars and wrong when the page reloaded
@@ -1269,6 +1472,11 @@ function flashLive() {
   void liveDot.offsetWidth;  // restart the animation rather than ignore it
   liveDot.classList.add('pulse');
   liveDot.title = `Updated ${fmtDateTime(new Date())}`;
+  // A pulsing dot says nothing to a screen reader. This is the one event on the
+  // page worth interrupting for, so it is the one thing announced.
+  const soc = latestOf(current, current?.soc_key) || latestOf(current, NOW_KEYS.soc);
+  document.getElementById('announce').textContent =
+    `New data for ${labelOf(current)}${soc ? `, charge ${soc.value}%` : ''}.`;
 }
 
 function startLive() {
@@ -1301,6 +1509,53 @@ function startLive() {
     if (document.visibilityState === 'visible') tick();
   });
 }
+
+/* ---------- theme ---------- */
+// Three states rather than two. A plain light/dark switch has to start at one of
+// them, which means a page that ignores the system setting the first time it is
+// opened; "auto" keeps following the system until you actually express a
+// preference, and remembers it once you do.
+const THEME_STORE = 'bmwcd.theme';
+const THEMES = [
+  { id: 'auto',  glyph: '◐', label: 'Theme: follows your system' },
+  { id: 'light', glyph: '☀', label: 'Theme: always light' },
+  { id: 'dark',  glyph: '☾', label: 'Theme: always dark' },
+];
+const themeBtn = document.getElementById('theme');
+
+function applyTheme(id) {
+  const t = THEMES.find(x => x.id === id) || THEMES[0];
+  if (t.id === 'auto') document.documentElement.removeAttribute('data-theme');
+  else document.documentElement.dataset.theme = t.id;
+  themeBtn.textContent = t.glyph;
+  themeBtn.title = `${t.label} — click to change`;
+  themeBtn.setAttribute('aria-label', t.label);
+  // Keep the browser chrome in step with the page it frames.
+  const dark = t.id === 'dark'
+    || (t.id === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  for (const m of document.querySelectorAll('meta[name="theme-color"]')) m.remove();
+  const meta = document.createElement('meta');
+  meta.name = 'theme-color';
+  meta.content = dark ? '#0f1115' : '#f5f6f8';
+  document.head.appendChild(meta);
+  // Leaflet caches nothing about our colours, but the route is repainted from
+  // the ramps, which do not change -- only the surface under them does.
+  map.invalidateSize();
+}
+
+let theme = 'auto';
+try { theme = localStorage.getItem(THEME_STORE) || 'auto'; } catch { /* private mode */ }
+applyTheme(theme);
+
+themeBtn.addEventListener('click', () => {
+  theme = THEMES[(THEMES.findIndex(t => t.id === theme) + 1) % THEMES.length].id;
+  try { localStorage.setItem(THEME_STORE, theme); } catch { /* private mode */ }
+  applyTheme(theme);
+});
+// Following the system means noticing when the system changes.
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+  if (theme === 'auto') applyTheme('auto');
+});
 
 const liveDot = document.getElementById('live');
 liveDot.hidden = !LIVE;

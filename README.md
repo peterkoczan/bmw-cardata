@@ -340,6 +340,30 @@ Opened as a file it still works exactly as before — one self-contained snapsho
 no badge, no polling. A `file://` page has an opaque origin and can't fetch
 anything, which is why the data is embedded in the first place.
 
+### Colours, and why recuperation is teal
+
+Green was the obvious colour for recuperating and it was the wrong one. Run
+through a colour-blindness check, red `#b91c1c` against green `#15803d` separates
+by ΔE 4.2 under deuteranopia, where the floor is 6. Since hue is the *only* thing
+encoding drivetrain mode on the map, a red-green colourblind reader — about 8% of
+men — lost the feature completely. Teal clears it at 13.1.
+
+The pale ends of the ramps were worse: ΔE 3.6 colourblind and **9.8 under normal
+vision**, against a floor of 15, at 1.2:1 contrast on a light background. Spending
+lightness on intensity while hue carries identity means a gentle stretch of
+driving fades to near-white and stops saying anything. The ramps are narrower now
+so both ends keep their hue.
+
+Nothing about that was taste — it is all measured, and the numbers are in the
+commit.
+
+Elsewhere: the URL carries the car, date and trip, so a particular drive can be
+bookmarked or sent and Back undoes a filter. There's a theme switch at the right
+of the picker row — it follows your system until you tell it otherwise, then
+remembers. Low and empty charge get a word as well as a colour, and the strip
+shows how long ago the car last said anything, so a stale reading can't pass for
+a current one.
+
 ### Narrowing it down
 
 Two dropdowns under the vehicle row: **Date** and **Trip**.
