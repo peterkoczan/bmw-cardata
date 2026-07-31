@@ -284,6 +284,32 @@ connected when they look like continuous movement:
 | below this it hasn't moved | 10 m |
 | above this it's a tunnel, not a drive | 2 km |
 
+### Watching it live
+
+**Open map** from the menu bar now serves the page instead of writing a file,
+and the page updates itself as data arrives. No refreshing. Leave it open on a
+second monitor while you drive and the route extends itself.
+
+```
+.venv/bin/python -m bmwcd serve [--port N]
+```
+
+is the same thing from a terminal. It binds to `127.0.0.1` and nothing else — not
+reachable from your network, GET only, three fixed routes, no credentials, writes
+nothing. Default port 8770, `map_port` in config.
+
+It polls a cheap `/stamp.json` (one indexed query: newest timestamp and row
+count) every 15 seconds and only pulls the full payload when that moves. When it
+does, the page rebuilds and **puts you back where you were** — same car, same
+date and trip filter, same scrub position. If you'd panned or zoomed the map
+yourself it keeps your view; if you hadn't, it reframes, so a drive in progress
+stays in shot as it grows. There's a green **live** dot on the right of the
+pickers that pulses on each update, and goes grey if the server goes away.
+
+Opened as a file it still works exactly as before — one self-contained snapshot,
+no badge, no polling. A `file://` page has an opaque origin and can't fetch
+anything, which is why the data is embedded in the first place.
+
 ### Narrowing it down
 
 Two dropdowns under the vehicle row: **Date** and **Trip**.

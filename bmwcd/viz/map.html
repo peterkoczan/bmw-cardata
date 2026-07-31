@@ -88,6 +88,22 @@
   .pickers label { cursor:pointer; }
   #focusnote { font-variant-numeric:tabular-nums; }
 
+  /* Shown only when the page is served, not when it is opened off disk -- a
+     "live" badge on a static snapshot would be a lie. */
+  #live { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+  #live i { width:8px; height:8px; border-radius:50%; background:#22c55e;
+    box-shadow:0 0 0 0 #22c55e99; }
+  #live.stale i { background:var(--muted); box-shadow:none; }
+  #live.pulse i { animation:livepulse 1.1s ease-out 2; }
+  @keyframes livepulse {
+    0%   { box-shadow:0 0 0 0 #22c55eaa; transform:scale(1); }
+    60%  { box-shadow:0 0 0 7px #22c55e00; transform:scale(1.35); }
+    100% { box-shadow:0 0 0 0 #22c55e00; transform:scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #live.pulse i { animation:none; }
+  }
+
   #state { flex:1 1 auto; min-height:90px; overflow-y:auto; padding:10px 16px 14px; }
   .group { margin-bottom:12px; }
   .group h4 { margin:0 0 6px; font-size:11px; letter-spacing:.09em; text-transform:uppercase;
@@ -133,6 +149,8 @@
         <select id="tripsel"></select></span>
       <button id="clearfocus" hidden>Show all</button>
       <span class="rowlabel" id="focusnote"></span>
+      <span id="live" class="rowlabel" hidden title="Watching for new data">
+        <i></i>live</span>
     </div>
     <div class="row">
       <button id="play">▶︎ Play</button>
@@ -152,7 +170,7 @@
   <div class="note" id="notes"></div>
 </div>
 <script>
-const DATA = /*__DATA__*/null;
+let DATA = /*__DATA__*/null;
 
 /* ---------- route colouring ---------- */
 const RAMPS = {
@@ -250,7 +268,7 @@ const ENUM_WORDS = {
 // BMW ships display names and categories in its catalogue; prefer those over
 // anything derived from the key path. The fallback only applies when the
 // catalogue has not been fetched.
-const LABELS = DATA?.labels || {};
+let LABELS = DATA?.labels || {};
 const labelFor = key => SHORT_LABELS[key] || LABELS[key]?.n || key.split('.').filter(p => p !== 'vehicle')
   .slice(-2).join(' ')
   .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
@@ -405,7 +423,7 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
   attribution:'&copy; OpenStreetMap, &copy; CARTO', maxZoom:20,
 }).addTo(map);
 
-const vehicles = DATA?.vehicles || [];
+let vehicles = DATA?.vehicles || [];
 
 // One layer group per car, built once and left off the map until its car is
 // selected. Drawing every car at once made two routes in the same town read as
@@ -453,7 +471,11 @@ function buildLayer(v) {
   return group;
 }
 
-for (const v of vehicles) layers.set(v.vin, buildLayer(v));
+function buildAllLayers() {
+  for (const group of layers.values()) map.removeLayer(group);
+  layers.clear();
+  for (const v of vehicles) layers.set(v.vin, buildLayer(v));
+}
 
 // Deferred to after layout: at script-execution time #map can still measure
 // zero, and Leaflet then fits the bounds against nothing and lands on zoom 0 --
@@ -479,6 +501,14 @@ function fitToVehicle(v) {
 // trip button, which is enough to wrap a row and steal ~30px from the map.
 // Leaflet does not watch its container, so without this the pane grows and the
 // bottom strip stays an unpainted black band until the next pan.
+// Run once the browser has laid the page out. requestAnimationFrame is the
+// right signal when the tab is visible and never fires when it is not, so a
+// hidden tab falls back to a task instead of waiting indefinitely.
+function afterLayout(fn) {
+  if (document.visibilityState === 'hidden') setTimeout(fn, 0);
+  else requestAnimationFrame(() => requestAnimationFrame(fn));
+}
+
 const mapEl = document.getElementById('map');
 if (window.ResizeObserver) {
   // Inside a frame: calling invalidateSize synchronously from the callback
@@ -715,7 +745,7 @@ const labelOf = v => overrideFor(v)?.name || exportedLabel(v);
 // Drop overrides that have been outranked, and ones for cars no longer in the
 // data. Left alone they are harmless but permanent: ignored on every read, and
 // still sitting there years later.
-{
+function pruneOverrides() {
   const live = new Set(vehicles.map(v => v.vin));
   let pruned = false;
   for (const [vin, o] of Object.entries(overrides)) {
@@ -787,22 +817,26 @@ function beginRename(v) {
   input.addEventListener('blur', () => finish(true));
 }
 
-for (const v of vehicles) {
-  const button = document.createElement('button');
-  const name = document.createElement('span');
-  name.className = 'name';
-  const sub = document.createElement('span');
-  sub.className = 'sub';
-  button.append(name, sub);
-  button.addEventListener('click', () => selectVehicle(v));
-  button.addEventListener('dblclick', e => { e.preventDefault(); beginRename(v); });
-  buttons.set(v.vin, button);
-  vehiclesEl.appendChild(button);
-  paintButton(v);
+function buildSwitcher() {
+  buttons.clear();
+  vehiclesEl.replaceChildren();
+  for (const v of vehicles) {
+    const button = document.createElement('button');
+    const name = document.createElement('span');
+    name.className = 'name';
+    const sub = document.createElement('span');
+    sub.className = 'sub';
+    button.append(name, sub);
+    button.addEventListener('click', () => selectVehicle(v));
+    button.addEventListener('dblclick', e => { e.preventDefault(); beginRename(v); });
+    buttons.set(v.vin, button);
+    vehiclesEl.appendChild(button);
+    paintButton(v);
+  }
+  // With one car there is nothing to switch between, but it can still be
+  // renamed, so the row stays.
+  document.querySelector('.vehrow').style.display = vehicles.length ? '' : 'none';
 }
-// With one car there is nothing to switch between, but it can still be renamed,
-// so the row stays.
-if (!vehicles.length) document.querySelector('.vehrow').style.display = 'none';
 
 /* ---------- date and trip pickers ---------- */
 // Position updates stop entirely while parked, so a day's fixes are several
@@ -956,7 +990,7 @@ function setFocus(next, { rebuildTrips = true } = {}) {
   focusNote.textContent = describeFocus(v);
   hideHover();
   apply(+slider.value);
-  requestAnimationFrame(() => fitToVehicle(v));
+  afterLayout(() => fitToVehicle(v));
 }
 
 dateSel.addEventListener('change', () => setFocus({ date: dateSel.value || null }));
@@ -969,14 +1003,143 @@ tripSel.addEventListener('change', () => {
 });
 clearFocusBtn.addEventListener('click', () => setFocus({ date: null, trip: null }));
 
-// Open on whichever car has said something most recently -- that is the one you
-// came to look at. Deferred behind two frames for the same reason fitToVehicle
-// is: #map has no real height until layout has run.
-const mostRecent = vehicles.slice().sort((a, b) =>
-  (timesFor(b).at(-1) ?? 0) - (timesFor(a).at(-1) ?? 0))[0];
-current = mostRecent || vehicles[0];
-showNotes(current);
-requestAnimationFrame(() => requestAnimationFrame(() => selectVehicle(current)));
+/* ---------- loading, and reloading ---------- */
+
+// Whichever car has said something most recently -- that is the one you came to
+// look at.
+function mostRecentVehicle() {
+  const stamp = v => Math.max(
+    ...(v.points || []).map(p => p.t),
+    ...Object.values(v.state || {}).flatMap(s => s.v.map(([t]) => t)),
+    0,
+  );
+  return vehicles.slice().sort((a, b) => stamp(b) - stamp(a))[0];
+}
+
+// Swap in a payload and rebuild everything derived from it. Used for the first
+// render and for every live update, so there is one code path rather than two
+// that drift apart.
+function ingest(payload, { keep = null } = {}) {
+  DATA = payload;
+  LABELS = payload?.labels || {};
+  vehicles = payload?.vehicles || [];
+
+  pruneOverrides();
+  buildAllLayers();
+  buildSwitcher();
+
+  const target = (keep && vehicles.find(v => v.vin === keep.vin)) || mostRecentVehicle();
+  current = target || null;
+  showNotes(current);
+  if (!current) return;
+
+  selectVehicle(current);
+  if (!keep) return;
+
+  // Put the view back where the user had it. selectVehicle resets the filter,
+  // which is right when *they* switch cars and wrong when the page reloaded
+  // itself underneath them.
+  const days = new Set([...dateSel.options].map(o => o.value));
+  const date = days.has(keep.date) ? keep.date : null;
+  const trip = keep.trip != null && tripById(current, keep.trip) ? keep.trip : null;
+  if (date || trip != null) setFocus({ date, trip });
+
+  // Scrubbed to a moment: hold that moment. Parked at the end: follow the end,
+  // which is the whole point of leaving the page open.
+  if (!keep.atLatest && keep.t != null) {
+    const idx = allTimes.findIndex(x => x >= keep.t);
+    slider.value = idx < 0 ? slider.max : idx;
+    apply(+slider.value);
+  }
+  if (keep.view) map.setView(keep.view.center, keep.view.zoom, { animate: false });
+}
+
+/* ---------- live updates ---------- */
+// Only when the page is served over http. Opened straight off disk it cannot
+// fetch anything -- a file:// origin is opaque -- so it stays the static
+// snapshot it has always been.
+const LIVE = location.protocol === 'http:' || location.protocol === 'https:';
+const POLL_MS = 15000;
+
+async function pollOnce(state) {
+  const stamp = await (await fetch('stamp.json', { cache: 'no-store' })).json();
+  const key = `${stamp.latest}|${stamp.rows}`;
+  if (key === state.key) return;
+  const first = state.key === null;
+  state.key = key;
+  if (first) return;  // the first poll only establishes the baseline
+
+  const payload = await (await fetch('data.json', { cache: 'no-store' })).json();
+  // Capture where the user is before pulling the rug out.
+  ingest(payload, {
+    keep: {
+      vin: current?.vin,
+      date: focus.date,
+      trip: focus.trip,
+      atLatest: +slider.value === +slider.max,
+      t: allTimes[+slider.value],
+      // Only if they have moved the map themselves; otherwise let the new data
+      // reframe it, so a drive in progress stays in view as it extends.
+      view: state.userMoved ? { center: map.getCenter(), zoom: map.getZoom() } : null,
+    },
+  });
+  flashLive();
+}
+
+function flashLive() {
+  liveDot.classList.remove('pulse');
+  void liveDot.offsetWidth;  // restart the animation rather than ignore it
+  liveDot.classList.add('pulse');
+  liveDot.title = `Updated ${fmtDateTime(new Date())}`;
+}
+
+function startLive() {
+  const state = { key: null, userMoved: false };
+  // Only genuine user gestures pin the view across an update. Listening to
+  // Leaflet's move/zoom events instead would fire on our own fitBounds, so the
+  // view would count as "user-controlled" from the first render onwards and a
+  // drive in progress would never stay framed.
+  const mark = () => { state.userMoved = true; };
+  map.on('dragend', mark);
+  mapEl.addEventListener('wheel', mark, { passive: true });
+  mapEl.addEventListener('dblclick', mark);
+  mapEl.addEventListener('click', e => {
+    if (e.target.closest('.leaflet-control-zoom')) mark();
+  });
+
+  // .then before .catch, not after: a catch handler returns a resolved promise,
+  // so a trailing .then runs on the failure path too and would clear the very
+  // class the catch just set.
+  const tick = () => pollOnce(state)
+    .then(() => liveDot.classList.remove('stale'))
+    // The server is gone (menu bar quit, laptop asleep). Keep trying quietly --
+    // it comes back, and a page full of error text helps nobody.
+    .catch(() => liveDot.classList.add('stale'));
+
+  tick();
+  setInterval(tick, POLL_MS);
+  // Catch up immediately on waking rather than waiting out the interval.
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tick();
+  });
+}
+
+const liveDot = document.getElementById('live');
+liveDot.hidden = !LIVE;
+
+// Rendered synchronously. This used to sit behind two animation frames, which
+// works right up until the page is opened in a background tab -- rAF callbacks
+// do not run while a tab is hidden, so the whole page stayed blank until it was
+// brought to the front. Only the map fit needs to wait for layout, and that is
+// deferred on its own inside setFocus.
+ingest(DATA);
+if (LIVE) startLive();
+
+// If the first layout happened while hidden, the map measured nothing. Re-fit
+// once it is actually on screen.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') afterLayout(() => fitToVehicle(current));
+});
 </script>
 </body>
 </html>

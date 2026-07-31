@@ -282,6 +282,14 @@ class App(rumps.App):
 
         self._show(st)
 
+        # Blink when the car says something. The glyph otherwise sits green for
+        # hours whether the stream is delivering or merely connected, and those
+        # look identical until you go and read the log.
+        seen = getattr(self, "_last_seen_message", None)
+        if seen is not None and st.last_message is not None and st.last_message > seen:
+            self._blink()
+        self._last_seen_message = st.last_message
+
         # Tell the user the moment it breaks. A red glyph nobody is looking at
         # is worth no more than no glyph, and the data is unrecoverable.
         was = getattr(self, "_was_connected", None)
@@ -403,14 +411,56 @@ class App(rumps.App):
         -- an indicator that shows nothing at all is worse than one showing a
         coloured dot.
         """
-        icon = ICONS / f"status-{st.colour}.png"
-        if icon.exists():
-            if getattr(self, "_icon_path", None) != str(icon):
-                self.icon = str(icon)
-                self._icon_path = str(icon)
-            self.title = ""
-        else:
+        # Track the true state even mid-blink, so the blink settles back to
+        # whatever the status is by the time it finishes rather than to whatever
+        # it was when it started.
+        self._resting_colour = st.colour
+        # A blink in progress owns the icon. Without this the next poll would
+        # paint the steady colour straight back over it.
+        if getattr(self, "_blinks_left", 0):
+            return
+        self._set_icon(st.colour)
+        if not (ICONS / f"status-{st.colour}.png").exists():
             self.title = st.glyph
+
+    def _set_icon(self, colour: str) -> None:
+        icon = ICONS / f"status-{colour}.png"
+        if not icon.exists():
+            return
+        if getattr(self, "_icon_path", None) != str(icon):
+            self.icon = str(icon)
+            self._icon_path = str(icon)
+        self.title = ""
+
+    def _blink(self) -> None:
+        """Flash the icon brighter for a moment, then settle back.
+
+        Driven by its own short timer rather than the 10s status poll: a blink
+        that lasts until the next poll is not a blink, it is a colour change.
+        """
+        if not (ICONS / "status-flash.png").exists():
+            return
+        self._resting_colour = getattr(self, "_resting_colour", "green")
+        already_blinking = getattr(self, "_blinks_left", 0) > 0
+        self._blinks_left = 4  # on, off, on, off
+        if already_blinking:
+            return  # let the running timer carry the extra flashes
+        self._blink_timer = rumps.Timer(self._blink_tick, 0.22)
+        self._blink_timer.start()
+
+    def _blink_tick(self, _timer) -> None:
+        left = getattr(self, "_blinks_left", 0)
+        if left <= 0:
+            self._blinks_left = 0
+            try:
+                self._blink_timer.stop()
+            except Exception:  # noqa: BLE001 - never take the indicator down
+                pass
+            self._set_icon(getattr(self, "_resting_colour", "green"))
+            return
+        self._blinks_left = left - 1
+        # Odd counts are the lit half of the cycle.
+        self._set_icon("flash" if left % 2 == 0 else getattr(self, "_resting_colour", "green"))
 
     def _note(self, title: str, message: str = ""):
         try:
@@ -566,11 +616,33 @@ class App(rumps.App):
         code, out = _sh("launchctl", "bootstrap", DOMAIN, str(PLIST))
         self._after("Start failed", code, out, expect_pid=True)
 
+    def _ensure_server(self):
+        """Start the local map server on first use, and keep it.
+
+        Started lazily rather than at launch: someone who never opens the map
+        should not have a listening socket, even one bound to loopback.
+        """
+        if getattr(self, "_httpd", None) is not None:
+            return self._httpd
+        from . import serve
+
+        self._httpd = serve.serve(self.cfg, self.cfg.map_port)
+        return self._httpd
+
     def open_map(self, _):
-        """Rebuild from what is in the database right now, then open it."""
+        """Open the live map, falling back to a static file if serving fails."""
         if self.cfg is None:
             return self._note("Not set up yet")
-        from . import export
+        from . import export, serve
+
+        try:
+            webbrowser.open(serve.url_for(self._ensure_server()))
+            return
+        except OSError as exc:
+            # Port already taken, most likely by an older copy of this app.
+            self._note("Live map unavailable", f"{exc}. Opening a static copy.")
+        except Exception as exc:  # noqa: BLE001
+            self._note("Live map unavailable", str(exc)[:120])
 
         try:
             page, _data = export.render(self.cfg)

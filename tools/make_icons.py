@@ -32,6 +32,10 @@ STATES = {
     "orange": (1.00, 0.58, 0.00),  # database unreachable
     "red": (1.00, 0.23, 0.19),     # stream down
     "grey": (0.56, 0.56, 0.58),    # unknown / not set up
+    # The blink shown when a message lands. A brighter green rather than a
+    # different shape: at 22 points a shape change reads as a different icon,
+    # where a brightness change reads as the same icon reacting.
+    "flash": (0.45, 1.00, 0.55),
 }
 
 
