@@ -114,6 +114,25 @@ def boolean_vocabulary(entry: dict) -> dict[str, bool | None]:
     return vocab
 
 
+def combustion_only_keys(spec: dict[str, dict]) -> set[str]:
+    """Keys BMW says only exist on something that burns fuel.
+
+    Every catalogue entry carries `vehicletypes` -- some subset of ICE, PHEV,
+    BEV and MHEV. A key whose list leaves BEV out belongs to a car with an
+    engine, which is a far better signal than guessing from the key name, and it
+    keeps working for models nobody here has ever seen.
+
+    Presence alone is not enough, mind: BMW sends `remainingFuel` and
+    `lastRemainingRange` on a battery car too, as a flat zero. See
+    `burns_fuel_from` for the value test that goes with this.
+    """
+    return {
+        key
+        for key, entry in spec.items()
+        if (types := entry.get("vehicletypes")) and "BEV" not in types
+    }
+
+
 def is_numeric(entry: dict) -> bool:
     return (entry.get("datatype") or "").lower() in {
         "float", "double", "integer", "int", "uint8", "int32", "uint32", "number"
