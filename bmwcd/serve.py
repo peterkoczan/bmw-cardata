@@ -25,6 +25,20 @@ from .config import Config
 
 HOST = "127.0.0.1"
 
+# Browsers ask for /favicon.ico on their own, whatever the page's <link> says,
+# and a 404 there is enough for some of them to give up and show the blank
+# default. Served from the same mark the page carries inline.
+FAVICON = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    "<circle cx='32' cy='32' r='30' fill='#0f1115'/>"
+    "<path d='M32 4a28 28 0 0 1 28 28H32z' fill='#3b82f6'/>"
+    "<path d='M32 32h28a28 28 0 0 1-28 28z' fill='#e6e9ef'/>"
+    "<path d='M32 32v28A28 28 0 0 1 4 32z' fill='#3b82f6'/>"
+    "<path d='M4 32A28 28 0 0 1 32 4v28z' fill='#e6e9ef'/>"
+    "<circle cx='32' cy='32' r='30' fill='none' stroke='#0f1115' stroke-width='5'/>"
+    "</svg>"
+).encode()
+
 
 def _stamp(cfg: Config) -> dict:
     """Cheap freshness probe: what is the newest row, and how many are there.
@@ -84,6 +98,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(export.build(self.cfg))
             elif path == "/stamp.json":
                 self._json(_stamp(self.cfg))
+            elif path in ("/favicon.ico", "/favicon.svg"):
+                self._send(FAVICON, "image/svg+xml")
             else:
                 self._json({"error": "not found"}, 404)
         except BrokenPipeError:
