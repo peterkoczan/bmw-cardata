@@ -10,6 +10,9 @@ class Config:
     def __init__(self, raw: dict):
         self.client_id: str = raw["client_id"]
         self.vins: list[str] = raw["vins"]
+        # VIN -> what to call it on the map. BMW streams no model name, so
+        # without this the only thing to label a car with is its VIN tail.
+        self.names: dict[str, str] = dict(raw.get("names", {}))
         self.expected_gcid: str | None = raw.get("gcid") or None
         # expanduser before is_absolute: "~/bmwdata" is not absolute, so without
         # it the path resolves to <repo>/~/bmwdata -- real GPS traces written
@@ -70,8 +73,64 @@ def set_value(key: str, value) -> None:
         if not replaced and bare.split("=")[0].strip() == key:
             out.append(f"{key} = {rendered}")
             replaced = True
+        # A top-level scalar must not land under a table header, where TOML
+        # would read it as a member of that table instead.
+        elif stripped.startswith("[") and not replaced:
+            out.append(f"{key} = {rendered}")
+            out.append(line)
+            replaced = True
         else:
             out.append(line)
     if not replaced:
         out.append(f"{key} = {rendered}")
+    CONFIG_PATH.write_text("\n".join(out) + "\n")
+
+
+def _toml_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def set_name(vin: str, name: str) -> None:
+    """Name a vehicle in the [names] table, or clear the name if empty.
+
+    Same text-editing approach as set_value, for the same reason. [names] lives
+    at the end of the file because everything after a TOML table header belongs
+    to that table -- appending a name anywhere else would silently swallow the
+    settings below it.
+    """
+    ensure()
+    lines = CONFIG_PATH.read_text().splitlines()
+    key = f'"{_toml_escape(vin)}"'
+    rendered = f'{key} = "{_toml_escape(name)}"'
+
+    out, in_names, written = [], False, False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("["):
+            # Leaving the table without having found the VIN: add it here, while
+            # we are still inside it.
+            if in_names and not written and name:
+                out.append(rendered)
+                written = True
+            in_names = stripped == "[names]"
+            out.append(line)
+            continue
+        # Match the VIN whether it was written quoted or bare, and whether or
+        # not the line is commented out.
+        bare = stripped[1:].lstrip() if stripped.startswith("#") else stripped
+        candidate = bare.split("=")[0].strip()
+        if in_names and candidate in (key, vin):
+            if name and not written:
+                out.append(rendered)
+                written = True
+            continue  # renaming to "" simply drops the line
+        out.append(line)
+
+    if in_names and not written and name:
+        out.append(rendered)
+        written = True
+    if not written and name:
+        out.append("")
+        out.append("[names]")
+        out.append(rendered)
     CONFIG_PATH.write_text("\n".join(out) + "\n")

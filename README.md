@@ -127,6 +127,12 @@ The menu has the setup flow, a retention setting, start/stop/restart, and
 it. Stopping from here actually stops it rather than having launchd bring it
 straight back.
 
+**Rename vehicle** lists every car that has streamed anything and lets you call
+it something better than a VIN tail. The list refreshes itself, so a newly added
+car turns up within a few minutes of its first message — no restart, no config
+editing. Names are written to `config.toml`; see [More than one
+car](#more-than-one-car).
+
 ### Sleep
 
 If I close the lid I lose whatever the car sent while it was shut. That's fine,
@@ -211,6 +217,59 @@ at a point.
 There's also no speed. BMW deliberately doesn't send it: "due to privacy reasons
 some functions are not allowed to transmit the current driving speed". You get a
 range like 50–60 km/h, so that's what the readout shows.
+
+### More than one car
+
+The subscription is a single wildcard topic covering the whole account, so I
+never told it which cars to expect. **A car shows up the first time it streams
+anything** — the map builds its list from what's actually in the database, not
+from a list I maintain. Add a car in the BMW portal, configure its stream, and it
+appears on its own. Nothing here assumes there are two of them.
+
+Buttons along the top switch between them, and switching changes everything: the
+map draws that car's route and nothing else, the dashboard shows its readings,
+the trip list is its trips.
+
+The time slider is per car too, which sounds like a detail and isn't. My X5 had
+eleven hours of history one day and the i3 had two minutes the next; on a shared
+timeline the whole of the i3 sat in the last pixel of the track and couldn't be
+scrubbed at all. Each car now gets its own axis. The page opens on whichever one
+reported most recently, since that's the one I came to look at.
+
+### Naming the cars
+
+Until you name one it's labelled by the tail of its VIN, which tells you nothing.
+There are two ways to fix that, and they're for different situations.
+
+**Double-click the name on the map** to edit it in place. Enter saves, Escape
+cancels, and clearing it puts the old name back. This is the quick one — but the
+map page is opened straight off disk and a `file://` page can't write to my
+config, so the name lives in that browser's local storage. It shows with a `*`
+and the line under the dashboard says what everything else still calls the car,
+so I can't forget which is which.
+
+**Rename vehicle in the menu bar** is the real one. It writes `config.toml`,
+which the exporter and the CLI both read, so the name follows the car
+everywhere:
+
+```toml
+[names]
+"WBAXXXXXXXXXXXXXX" = "X5"
+"WBYXXXXXXXXXXXXXX" = "i3"
+```
+
+Keep that block at the bottom of the file — everything after a TOML table header
+belongs to that table, so anything you put below it stops being a top-level
+setting.
+
+If the two ever disagree, config wins: a name typed into the browser is dropped
+as soon as `config.toml` says something different. Otherwise a label I typed once
+would quietly outrank every change I made afterwards.
+
+One more thing worth knowing: a car that has never reported fuel above zero is
+treated as battery-only, and its fuel tiles and the petrol swatch disappear. The
+i3 reports `remainingFuel` and `lastRemainingRange` as a flat zero, and "Fuel in
+tank 0 l" next to "Electric range 219 km" is worse than showing nothing.
 
 ### Trips
 

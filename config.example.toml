@@ -10,6 +10,8 @@ vins = [
     "WBAXXXXXXXXXXXXXX",
     "WBYXXXXXXXXXXXXXX",
 ]
+# To label these something friendlier than a VIN tail on the map, see [names]
+# at the bottom of this file.
 
 # Optional cross-check against the GCID shown in the portal under
 # CARDATA STREAM -> Show Connection Details -> USERNAME.
@@ -36,3 +38,12 @@ retention_days = 30
 # again by the nightly prune in case it is not running.
 log_max_mb = 10
 log_keep = 3
+
+# What to call each car on the map's vehicle switcher. BMW streams no model name
+# anywhere in the 245 attributes, so without this a car can only be labelled by
+# the tail of its VIN. Any VIN left out falls back to that.
+#
+# Keep this last: everything below a TOML table header belongs to that table.
+[names]
+# "WBAXXXXXXXXXXXXXX" = "X5"
+# "WBYXXXXXXXXXXXXXX" = "i3"
