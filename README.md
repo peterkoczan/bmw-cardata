@@ -236,9 +236,21 @@ timeline the whole of the i3 sat in the last pixel of the track and couldn't be
 scrubbed at all. Each car now gets its own axis. The page opens on whichever one
 reported most recently, since that's the one I came to look at.
 
-Cars are labelled by the tail of their VIN until you name them. To rename one,
-use **Rename vehicle** in the menu bar and it's saved in `config.toml` under
-`[names]`:
+### Naming the cars
+
+Until you name one it's labelled by the tail of its VIN, which tells you nothing.
+There are two ways to fix that, and they're for different situations.
+
+**Double-click the name on the map** to edit it in place. Enter saves, Escape
+cancels, and clearing it puts the old name back. This is the quick one — but the
+map page is opened straight off disk and a `file://` page can't write to my
+config, so the name lives in that browser's local storage. It shows with a `*`
+and the line under the dashboard says what everything else still calls the car,
+so I can't forget which is which.
+
+**Rename vehicle in the menu bar** is the real one. It writes `config.toml`,
+which the exporter and the CLI both read, so the name follows the car
+everywhere:
 
 ```toml
 [names]
@@ -249,6 +261,10 @@ use **Rename vehicle** in the menu bar and it's saved in `config.toml` under
 Keep that block at the bottom of the file — everything after a TOML table header
 belongs to that table, so anything you put below it stops being a top-level
 setting.
+
+If the two ever disagree, config wins: a name typed into the browser is dropped
+as soon as `config.toml` says something different. Otherwise a label I typed once
+would quietly outrank every change I made afterwards.
 
 One more thing worth knowing: a car that has never reported fuel above zero is
 treated as battery-only, and its fuel tiles and the petrol swatch disappear. The

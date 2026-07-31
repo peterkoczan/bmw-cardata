@@ -337,16 +337,28 @@ class App(rumps.App):
             return
         self._vins, self._vin_titles = found, titles
 
-        self.item_rename.clear()
-        if not found:
-            self.item_rename.add(rumps.MenuItem("Nothing has streamed yet"))
-            return
-        for vin, title in zip(found, titles):
-            item = rumps.MenuItem(title, callback=self._rename_vehicle)
-            # rumps identifies a clicked item by its title, which is exactly what
-            # this dialog lets you change; carry the VIN itself instead.
-            item.vin = vin
-            self.item_rename.add(item)
+        # Rebuilding a menu is Cocoa work on the UI thread and this runs from
+        # __init__, where an exception takes the whole indicator down and
+        # KeepAlive then crash-loops it. A missing submenu is a far smaller
+        # problem than no menu bar item at all.
+        try:
+            # rumps only creates the backing NSMenu when something is first added
+            # to a submenu, and clear() dereferences it unguarded -- so clearing
+            # one that has never held an item raises. len() reads the dict, not
+            # the NSMenu, so it is safe on a fresh item.
+            if len(self.item_rename):
+                self.item_rename.clear()
+            if not found:
+                self.item_rename.add(rumps.MenuItem("Nothing has streamed yet"))
+                return
+            for vin, title in zip(found, titles):
+                item = rumps.MenuItem(title, callback=self._rename_vehicle)
+                # rumps identifies a clicked item by its title, which is exactly
+                # what this dialog lets you change; carry the VIN itself instead.
+                item.vin = vin
+                self.item_rename.add(item)
+        except Exception:  # noqa: BLE001 - the indicator must never crash
+            self._vins, self._vin_titles = [], None  # retry on the next tick
 
     def _rename_vehicle(self, sender) -> None:
         vin = getattr(sender, "vin", None)
