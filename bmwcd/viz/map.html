@@ -96,9 +96,24 @@
   #snapshot a { color:#7aa2f7; }
   #snapshot[hidden] { display:none; }
 
+  /* The at-a-glance strip, filling the gap that used to sit empty between the
+     focus note and the live dot. Always the newest reading, never the scrub
+     position -- the dashboard below already follows the slider, and the
+     question this answers is "what is the car doing now". */
+  #now { margin-left:auto; display:inline-flex; align-items:center; gap:14px;
+    font-size:12.5px; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  #now[hidden] { display:none; }
+  #now .grp { display:inline-flex; align-items:baseline; gap:6px; }
+  #now .ico { font-size:13px; opacity:.85; }
+  #now .pct { font-weight:600; font-size:14px; }
+  #now .rng { color:var(--muted); }
+  /* Below a quarter left, the number is the point of the strip. */
+  #now .grp.low .pct { color:#f97316; }
+  #now .grp.empty .pct { color:#ef4444; }
+
   /* Shown only when the page is served, not when it is opened off disk -- a
      "live" badge on a static snapshot would be a lie. */
-  #live { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+  #live { display:inline-flex; align-items:center; gap:6px; }
   /* An author `display` beats the UA stylesheet's [hidden] { display:none },
      so setting .hidden on this element does nothing without saying so here.
      The property reads true while the badge sits there in plain sight. */
@@ -165,6 +180,7 @@
         <select id="tripsel"></select></span>
       <button id="clearfocus" hidden>Show all</button>
       <span class="rowlabel" id="focusnote"></span>
+      <span id="now" hidden></span>
       <span id="live" class="rowlabel" hidden title="Watching for new data">
         <i></i>live</span>
     </div>
@@ -345,6 +361,19 @@ const fmtDateTime = d =>
   `${fmtDate(d)} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 const fmtTime = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 
+// Durations. "113.8m" next to "117 km" reads as metres, which is exactly how it
+// was read -- a two-hour drive looked like a distance. Hours and minutes, spelt
+// so the unit cannot be mistaken for a length.
+function fmtDuration(minutes) {
+  if (minutes == null) return '';
+  const total = Math.round(minutes);
+  if (total < 1) return 'under a minute';
+  if (total < 60) return `${total} min`;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  return m ? `${h}h ${m}min` : `${h}h`;
+}
+
 /* ---------- hover readout ---------- */
 const hoverEl = document.getElementById('hover');
 
@@ -507,7 +536,16 @@ function buildAllLayers() {
 // zero, and Leaflet then fits the bounds against nothing and lands on zoom 0 --
 // the whole world, with the route an invisible speck. invalidateSize() once the
 // geometry is real fixes it.
+// Set when a fit was asked for while the map had no real size, so it can be run
+// the moment it does. A hidden document performs no layout at all, so the
+// container measures zero however long you wait -- delaying the fit does not
+// help, and fitting anyway lands on zoom 0: the whole world, route invisible.
+let pendingFit = null;
+
 function fitToVehicle(v) {
+  const box = mapEl.getBoundingClientRect();
+  if (box.width < 40 || box.height < 40) { pendingFit = v; return; }
+  pendingFit = null;
   map.invalidateSize();
   // Only what is actually drawn: framing a single trip against the whole
   // month's bounds would leave it a speck in the corner.
@@ -531,16 +569,38 @@ function fitToVehicle(v) {
 // right signal when the tab is visible and never fires when it is not, so a
 // hidden tab falls back to a task instead of waiting indefinitely.
 function afterLayout(fn) {
-  if (document.visibilityState === 'hidden') setTimeout(fn, 0);
-  else requestAnimationFrame(() => requestAnimationFrame(fn));
+  if (document.visibilityState !== 'hidden') {
+    requestAnimationFrame(() => requestAnimationFrame(fn));
+    return;
+  }
+  // A hidden tab runs no animation frames. Do both: a delayed timeout so the
+  // map is drawn against a laid-out container even if the page is never looked
+  // at, and a re-fit when it does become visible.
+  //
+  // Waiting only for visibility leaves the map permanently blank anywhere the
+  // document reports hidden for its whole life -- an embedded preview pane, a
+  // headless capture. Firing only a timeout at 0ms fits against a zero-height
+  // container and lands on zoom 0, the whole world with the route a speck.
+  // Neither alone is enough.
+  setTimeout(fn, 150);
+  document.addEventListener('visibilitychange', function once() {
+    if (document.visibilityState === 'hidden') return;
+    document.removeEventListener('visibilitychange', once);
+    requestAnimationFrame(() => requestAnimationFrame(fn));
+  });
 }
 
 const mapEl = document.getElementById('map');
 if (window.ResizeObserver) {
   // Inside a frame: calling invalidateSize synchronously from the callback
   // makes browsers complain about an undelivered-notification loop.
-  new ResizeObserver(() => requestAnimationFrame(() => map.invalidateSize()))
-    .observe(mapEl);
+  new ResizeObserver(() => requestAnimationFrame(() => {
+    map.invalidateSize();
+    // The container getting a real size is the signal a deferred fit was
+    // waiting for, and it arrives whatever the reason -- the tab being shown, a
+    // window resize, a preview pane finally laying out.
+    if (pendingFit) fitToVehicle(pendingFit);
+  })).observe(mapEl);
 }
 window.addEventListener('resize', () => map.invalidateSize());
 
@@ -646,6 +706,91 @@ function paintPanel(v, t) {
   }
 }
 
+/* ---------- the "right now" strip ---------- */
+// Deliberately not tied to the slider. The dashboard below already answers
+// "what was it doing at this moment"; this answers "how much is left", which is
+// the question you glance at the page for while the car is out.
+const NOW_KEYS = {
+  soc: 'vehicle.drivetrain.batteryManagement.header',
+  electric: 'vehicle.drivetrain.electricEngine.kombiRemainingElectricRange',
+  fuel: 'vehicle.drivetrain.fuelSystem.level',
+  total: 'vehicle.drivetrain.lastRemainingRange',
+};
+const nowEl = document.getElementById('now');
+
+function latestOf(v, key) {
+  const s = key && v?.state?.[key];
+  if (!s?.v?.length) return null;
+  const [t, value] = s.v.at(-1);
+  return { value, t, unit: s.u };
+}
+
+function nowGroup(icon, label, pct, km, note) {
+  const g = document.createElement('span');
+  g.className = 'grp';
+  if (pct != null) g.classList.add(pct <= 10 ? 'empty' : pct <= 25 ? 'low' : 'ok');
+
+  const i = document.createElement('span');
+  i.className = 'ico';
+  i.textContent = icon;
+  g.appendChild(i);
+
+  if (pct != null) {
+    const p = document.createElement('span');
+    p.className = 'pct';
+    p.textContent = `${group(pct)}%`;
+    g.appendChild(p);
+  }
+  if (km != null) {
+    const r = document.createElement('span');
+    r.className = 'rng';
+    r.textContent = `${group(Math.round(km))} km`;
+    g.appendChild(r);
+  }
+  g.title = note ? `${label}\n${note}` : label;
+  return g;
+}
+
+function paintNow(v) {
+  nowEl.replaceChildren();
+  const soc = latestOf(v, v?.soc_key) || latestOf(v, NOW_KEYS.soc);
+  const electric = latestOf(v, NOW_KEYS.electric);
+  const fuel = latestOf(v, NOW_KEYS.fuel);
+  const total = latestOf(v, NOW_KEYS.total);
+
+  // The state series holds value *changes* only, so the last entry is when the
+  // reading last moved, not when it was last confirmed. A tank sitting at 100%
+  // legitimately has its most recent entry a day back; calling that "reported"
+  // would be wrong.
+  const when = r => r ? `unchanged since ${fmtDateTime(new Date(r.t))}` : '';
+  const parts = [];
+
+  if (soc || electric) {
+    parts.push(nowGroup('⚡', 'Battery charge and electric range',
+      soc?.value ?? null, electric?.value ?? null, when(soc || electric)));
+  }
+
+  // A battery car has no tank; BMW still sends lastRemainingRange as a flat 0,
+  // which would render as a very alarming "0 km".
+  if (v?.burns_fuel !== false) {
+    // BMW reports a combined range, not a petrol one. The difference is the
+    // only petrol figure available, so it is derived and labelled as such.
+    const petrol = (total?.value != null && total.value > 0)
+      ? Math.max(0, total.value - (electric?.value ?? 0))
+      : null;
+    if (fuel || petrol != null) {
+      parts.push(nowGroup('⛽', 'Fuel level and petrol range',
+        fuel?.value ?? null, petrol,
+        [when(fuel || total),
+         petrol != null ? 'petrol range = combined range minus electric' : '']
+          .filter(Boolean).join('\n')));
+    }
+  }
+
+  nowEl.hidden = !parts.length;
+  for (const p of parts) nowEl.appendChild(p);
+}
+
 /* ---------- apply ---------- */
 // Only the selected car: the others are not on the map, and painting their
 // geometry would be work nobody can see.
@@ -717,6 +862,7 @@ function selectVehicle(v) {
   }
 
   buildPanel(v);
+  paintNow(v);
   showNotes(v);
 
   // Each car has its own dates and trips, so a filter from the previous one
@@ -908,7 +1054,7 @@ function daysFor(v) {
 }
 
 function tripSummary(t) {
-  const parts = [`${t.km} km`, `${t.minutes}m`];
+  const parts = [`${t.km} km`, fmtDuration(t.minutes)];
   if (t.avg_kmh != null) parts.push(`${t.avg_kmh} km/h incl. stops`);
   const a = t.approx ? '~' : '';
   if (t.kwh_per_100km != null) parts.push(`${a}${t.kwh_per_100km} kWh/100km`);
@@ -955,7 +1101,7 @@ function buildTripPicker(v) {
       : fmtTime(new Date(t.start));
     tripSel.appendChild(option(
       String(t.trip),
-      `${when} · ${t.km} km · ${t.minutes}m`,
+      `${when} · ${t.km} km · ${fmtDuration(t.minutes)}`,
     ));
   }
   // A trip selected on another day cannot survive the date changing under it.
