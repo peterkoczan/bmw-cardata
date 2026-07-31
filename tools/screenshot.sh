@@ -18,7 +18,7 @@ sleep 1
 
 "$CHROME" --headless --disable-gpu --hide-scrollbars \
     --window-size=1600,1100 \
-    --virtual-time-budget=12000 \
+    --virtual-time-budget=30000 \
     --screenshot="$ROOT/docs/screenshot.png" \
     "http://localhost:$PORT/demo.html" >/dev/null 2>&1
 

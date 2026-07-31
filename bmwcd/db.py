@@ -157,6 +157,22 @@ def load_jsonl(cfg: Config, paths: list[Path]) -> tuple[int, int]:
     return seen, written
 
 
+def vins(cfg: Config) -> list[str]:
+    """Every VIN that has ever sent something, newest talker first.
+
+    Read from the data rather than from config.vins: the subscription is a
+    wildcard over the whole account, so a car added in the BMW portal starts
+    streaming without anyone editing config, and this is what makes it show up.
+    """
+    with connect(cfg) as conn:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT vin FROM telemetry GROUP BY vin ORDER BY max(ts) DESC"
+            ).fetchall()
+        ]
+
+
 def prune(cfg: Config) -> int:
     """Drop rows past the retention window. Configurable via retention_days."""
     with connect(cfg) as conn:

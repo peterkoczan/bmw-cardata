@@ -123,6 +123,13 @@ def main(argv: list[str] | None = None) -> int:
         out, data = export.render(cfg, days)
         fixes = sum(len(v["points"]) for v in data["vehicles"])
         print(f"Wrote {out} ({len(data['vehicles'])} vehicle(s), {fixes} fixes)")
+        for vehicle in data["vehicles"]:
+            print(
+                f"  {vehicle['label']} ({vehicle['vin']}): "
+                f"{len(vehicle['points'])} fixes, {len(vehicle['state'])} keys"
+            )
+            for note in vehicle["notes"]:
+                print(f"    note: {note}")
         for note in data["notes"]:
             print(f"  note: {note}")
         return 0
