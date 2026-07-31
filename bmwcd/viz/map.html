@@ -204,6 +204,16 @@ const colourFor = pt => {
   return mix(lo, hi, Math.max(0, Math.min(1, pt.intensity ?? 0)));
 };
 
+// How the route is drawn either side of the scrub position. The part not yet
+// reached has to stay clearly secondary without disappearing: it used to be
+// drawn at 0.12, which reads fine zoomed out over a town and vanishes into the
+// basemap zoomed into a long motorway run, where a single segment is a straight
+// line the width of the screen sitting directly on top of the road it followed.
+// Raised, and given a thinner line and smaller dots as well, so the difference
+// survives even where the colours do not.
+const PAST  = { line: .9,  weight: 5, dotStroke: .9,  dotFill: 1,   radius: 3.5 };
+const AHEAD = { line: .45, weight: 3, dotStroke: .65, dotFill: .5,  radius: 2.8 };
+
 /* ---------- value formatting ---------- */
 const GROUPS = {
   drivetrain:'Drivetrain', powertrain:'Powertrain', chassis:'Chassis',
@@ -650,8 +660,10 @@ function apply(idx) {
   }
   for (const p of v?.points || []) {
     const past = p.t <= t;
-    if (p._line) p._line.setStyle({ opacity: past ? .9 : .12 });
-    if (p._dot) p._dot.setStyle({ opacity: past ? .9 : .1, fillOpacity: past ? 1 : .1 });
+    const s = past ? PAST : AHEAD;
+    if (p._line) p._line.setStyle({ opacity: s.line, weight: s.weight });
+    if (p._dot) p._dot.setStyle({ opacity: s.dotStroke, fillOpacity: s.dotFill,
+                                  radius: s.radius });
   }
   paintPanel(v, t);
 }
