@@ -26,7 +26,11 @@ launchd for systemd and skip the menu bar.
 | Python | 3.11+, because I use `tomllib` |
 | Database | PostgreSQL 14+ (the installer sets up 17 via Homebrew) |
 | Packages | paho-mqtt, requests, certifi, psycopg, rumps |
-| Network | outbound TLS 1.3 to `customer.streaming-cardata.bmwgroup.com:9000` |
+| Network out | TLS 1.3 to `customer.streaming-cardata.bmwgroup.com:9000` |
+| Network in | the live map listens on `127.0.0.1:8770` — loopback only, not reachable from your network. `map_port = 0` turns it off |
+
+The map server is stdlib `http.server`, so it adds no dependency. It serves three
+fixed routes, answers `GET` only, holds no credentials and writes nothing.
 
 Things no code can fix:
 
@@ -54,6 +58,10 @@ agents. You can run it again safely — it updates the clone and leaves your
 
 Then click the menu bar icon and pick **Set up / re-authorise…**. It tells you
 what to do in the BMW portal, takes your Client ID, and handles the sign-in.
+
+Once that's done, the live map is at **<http://127.0.0.1:8770/>** — the indicator
+starts serving it at launch, so that URL is worth bookmarking. **Open map** in the
+menu goes to the same place.
 
 ## Setting it up in the BMW portal
 
