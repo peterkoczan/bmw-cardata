@@ -1,0 +1,14 @@
+[Unit]
+Description=BMW CarData retention prune
+Documentation=https://github.com/peterkoczan/bmw-cardata
+After=postgresql.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python -m bmwcd prune
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__ROOT__

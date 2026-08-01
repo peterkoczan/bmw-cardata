@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Linking your car — bmw-cardata</title>
+<meta name="description" content="Step by step: connecting a BMW to CarData streaming — creating a client, the two toggles that matter, choosing attributes per vehicle, and authorising without ever giving the app your BMW password.">
+<link rel="canonical" href="https://peterkoczan.github.io/bmw-cardata/setup.html">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Linking your car to BMW CarData streaming">
+<meta property="og:description" content="The portal steps, the two toggles that silently break everything if missed, and how authorisation works without handing over your password.">
+<meta property="og:url" content="https://peterkoczan.github.io/bmw-cardata/setup.html">
+<link rel="icon" type="image/svg+xml" sizes="any" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e9ef;
+          --muted:#99a1b3; --accent:#7aa2f7; --warn:#f59e0b; }
+  html { color-scheme: dark; }
+  @media (prefers-color-scheme: light) {
+    html { color-scheme: light; }
+    :root { --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b;
+            --muted:#5b6474; --accent:#1d4ed8; --warn:#b45309; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.65 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width:760px; margin:0 auto; padding:48px 22px 80px; }
+  a { color:var(--accent); }
+  h1 { font-size:1.9rem; line-height:1.2; margin:0 0 .3em; letter-spacing:-.02em; }
+  h2 { font-size:1.05rem; margin:0 0 .5em; letter-spacing:-.01em; }
+  p { margin:0 0 1em; }
+  .lede { color:var(--muted); font-size:1.08rem; margin-bottom:2em; }
+  .back { display:inline-block; margin-bottom:1.6em; font-size:.92rem; }
+
+  ol.steps { list-style:none; counter-reset:step; padding:0; margin:0; }
+  ol.steps > li { counter-increment:step; position:relative;
+    padding:0 0 1.6em 52px; margin:0; border-left:1px solid var(--line);
+    margin-left:15px; }
+  ol.steps > li:last-child { border-left-color:transparent; }
+  ol.steps > li::before { content:counter(step); position:absolute; left:-16px; top:-2px;
+    width:32px; height:32px; border-radius:50%; background:var(--panel);
+    border:1px solid var(--line); color:var(--accent); font-weight:700;
+    font-size:.95rem; display:grid; place-items:center; }
+
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:9px;
+    padding:12px 15px; margin:0 0 1em; }
+  .card.warn { border-color:color-mix(in oklab, var(--warn) 45%, transparent);
+    background:color-mix(in oklab, var(--warn) 8%, var(--panel)); }
+  .card h3 { margin:0 0 .35em; font-size:.9rem; letter-spacing:.02em;
+    text-transform:uppercase; color:var(--warn); }
+  .card.plain h3 { color:var(--muted); }
+  .card p:last-child { margin-bottom:0; }
+
+  code { background:var(--panel); border:1px solid var(--line); border-radius:5px;
+    padding:1px 5px; font-size:.9em; }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:12px 14px; overflow-x:auto; }
+  pre code { background:none; border:0; padding:0; }
+  kbd { background:var(--panel); border:1px solid var(--line); border-bottom-width:2px;
+    border-radius:5px; padding:1px 6px; font-size:.85em; }
+
+  /* A screenshot when one has been dropped in, and an honest placeholder when
+     not. Nothing here ships a picture of BMW's site that we invented. */
+  figure { margin:1em 0; }
+  figure img { width:100%; border-radius:8px; border:1px solid var(--line);
+    display:block; }
+  figure img.missing { display:none; }
+  .shot-todo { border:1px dashed var(--line); border-radius:8px; padding:18px;
+    color:var(--muted); font-size:.9rem; text-align:center; }
+  figcaption { color:var(--muted); font-size:.85rem; padding-top:.45em; }
+  footer { margin-top:3em; padding-top:1.4em; border-top:1px solid var(--line);
+    color:var(--muted); font-size:.9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<a class="back" href="./">← bmw-cardata</a>
+
+<h1>Linking your car</h1>
+<p class="lede">About three minutes in BMW's portal, then one approval in your
+browser. You never type your BMW password into this app — it never sees it.</p>
+
+<div class="card plain">
+  <h3>Before you start</h3>
+  <p>You need a My BMW account where you are the <strong>primary user</strong> of
+  the car. A secondary user cannot set up a stream. CarData streaming is
+  currently EU-only.</p>
+</div>
+
+<ol class="steps">
+
+<li>
+  <h2>Open CarData in the My BMW portal</h2>
+  <p>Sign in at <a href="https://www.bmw.de/de-de/mybmw/vehicle-overview">bmw.&lt;your
+  country&gt;</a> → account menu → <em>Vehicle overview</em>. Under your car,
+  open <strong>BMW CarData</strong> and accept the terms.</p>
+  <div class="card warn">
+    <h3>Worth knowing</h3>
+    <p>Accepting also commits you to terms changes coming into force over the
+    following six weeks.</p>
+  </div>
+  <figure>
+    <img src="setup-1-cardata.png" alt="The CarData section of the My BMW vehicle overview."
+         onerror="this.classList.add('missing');this.nextElementSibling.hidden=false">
+    <div class="shot-todo" hidden>Screenshot: the CarData entry under your vehicle</div>
+    <figcaption>CarData sits under the vehicle, not under account settings.</figcaption>
+  </figure>
+</li>
+
+<li>
+  <h2>Create a CarData client and copy the Client ID</h2>
+  <p>Click <strong>Create CarData client</strong>. The portal shows a Client ID —
+  a UUID. Copy it; you will paste it into the app in step 5.</p>
+  <div class="card plain">
+    <h3>This is not a secret you type anywhere else</h3>
+    <p>It identifies the app, not you. Authorisation happens separately, on
+    BMW's own site.</p>
+  </div>
+</li>
+
+<li>
+  <h2>Turn on <em>both</em> toggles</h2>
+  <p>On the same page, enable:</p>
+  <ul>
+    <li><strong>Request access to the CarData API</strong></li>
+    <li><strong>CarData stream</strong></li>
+  </ul>
+  <div class="card warn">
+    <h3>The one that costs an afternoon</h3>
+    <p>Miss the <strong>stream</strong> toggle and everything still looks fine:
+    sign-in succeeds, tokens are issued, and then MQTT rejects the connection
+    with nothing useful in the error. If you get authorised but never receive a
+    message, come back and check this.</p>
+  </div>
+  <figure>
+    <img src="setup-2-toggles.png" alt="Both CarData toggles switched on."
+         onerror="this.classList.add('missing');this.nextElementSibling.hidden=false">
+    <div class="shot-todo" hidden>Screenshot: both toggles enabled</div>
+  </figure>
+</li>
+
+<li>
+  <h2>Choose what the car sends — per vehicle</h2>
+  <p>Click <strong>Configure data stream</strong>, tick the attributes you want,
+  then <strong>Submit and start stream</strong>. Ticking everything is fine.</p>
+  <div class="card warn">
+    <h3>Repeat for each car</h3>
+    <p>The stream is configured per VIN. A second car stays silent until you do
+    this for it too.</p>
+  </div>
+  <div class="card plain">
+    <h3>You will get less than you select</h3>
+    <p>Of 245 streamable attributes selected on my X5, about 75 have ever
+    arrived. Position updates depend on the car: Live Cockpit Professional
+    reports every few minutes while driving, Live Cockpit Plus only at the start
+    and end of a trip. There is no setting for this — it is what BMW sends.</p>
+  </div>
+</li>
+
+<li>
+  <h2>Authorise the app</h2>
+  <p>In the menu bar, choose <strong>Set up / re-authorise…</strong>, paste the
+  Client ID, and click Authorise. A browser opens at BMW's device-link page with
+  a short code already on your clipboard. Sign in there, paste the code, approve.</p>
+  <pre><code>.venv/bin/python -m bmwcd auth   # the same thing from a terminal</code></pre>
+  <div class="card warn">
+    <h3>Do not click "Authenticate device" in the portal</h3>
+    <p>That is a different flow. The app runs the device step itself — the only
+    thing you do in the browser is sign in and approve the code.</p>
+  </div>
+</li>
+
+<li>
+  <h2>Check it is actually working</h2>
+  <p>The menu bar icon turns green once the stream is connected and the car has
+  said something recently. Green means <em>connected and delivering</em>, not
+  merely "the process is running" — that distinction is the whole reason the
+  indicator exists.</p>
+  <p>Nothing arrives while the car is asleep. Unlock it, or drive, and messages
+  start landing within a minute or two.</p>
+</li>
+
+</ol>
+
+<h2>When it stops working</h2>
+<div class="card plain">
+  <h3>Refresh tokens expire</h3>
+  <p>BMW's refresh token lasts about two weeks and rotates on every use. If the
+  stream goes red with <code>needs_auth</code>, run
+  <strong>Set up / re-authorise…</strong> again — the Client ID stays the same,
+  so it is one approval and nothing else.</p>
+</div>
+
+<footer>
+  <a href="./">Overview</a> ·
+  <a href="demo.html">Live demo</a> ·
+  <a href="https://github.com/peterkoczan/bmw-cardata">Source</a><br>
+  Not affiliated with or endorsed by BMW.
+</footer>
+
+</div>
+</body>
+</html>

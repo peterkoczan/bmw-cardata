@@ -557,6 +557,9 @@ def build(cfg: Config, days: int | None = None) -> dict:
         # than sit there quietly going out of date. This file only changes when
         # somebody runs `bmwcd export`, which is not obvious from looking at it.
         "live_url": f"http://127.0.0.1:{cfg.map_port}/" if cfg.map_port else None,
+        # How much history this payload covers, so the page can say so rather
+        # than let a window pass for the whole record.
+        "window_days": days,
         "vehicles": vehicles,
         "labels": labels,
         "categories": list(CATEGORY_LABELS.values()),

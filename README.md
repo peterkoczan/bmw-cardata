@@ -14,15 +14,16 @@ not my car.
 
 ## What you need
 
-This is macOS-only, and not by accident. The service supervision is launchd, the
-menu bar app is native, and a few things shell out to `open` and `pbcopy`. The
-core of it (auth, the MQTT client, the database, the map export) is plain Python
-and would run anywhere. Everything around it wouldn't. On Linux you'd swap
-launchd for systemd and skip the menu bar.
+Built for macOS, but the macOS part turned out to be a thinner shell than I
+expected. Auth, the MQTT client, the database, the map export and the map server
+are plain Python with no platform code in them at all. What's actually
+Mac-specific is the menu bar app and the launchd agents — so there are systemd
+units in `systemd/` for running it headless on Linux, and everything except the
+indicator works there unchanged.
 
 | | |
 |---|---|
-| OS | macOS 13 or newer |
+| OS | macOS 13 or newer for the menu bar app; Linux runs it headless |
 | Python | 3.11+, because I use `tomllib` |
 | Database | PostgreSQL 14+ (the installer sets up 17 via Homebrew) |
 | Packages | paho-mqtt, requests, certifi, psycopg, rumps |
@@ -58,6 +59,13 @@ agents. You can run it again safely — it updates the clone and leaves your
 
 Then click the menu bar icon and pick **Set up / re-authorise…**. It tells you
 what to do in the BMW portal, takes your Client ID, and handles the sign-in.
+There's a fuller walkthrough with the traps in it at
+**[Linking your car](https://peterkoczan.github.io/bmw-cardata/setup.html)**.
+
+On Linux there's no menu bar, so it's `./systemd/install.sh` for the units and
+`.venv/bin/python -m bmwcd auth` for the sign-in. The stream, the database, the
+map server and the nightly prune all run there unchanged — only the indicator is
+macOS-only.
 
 Once that's done, the live map is at **<http://127.0.0.1:8770/>** — the indicator
 starts serving it at launch, so that URL is worth bookmarking. **Open map** in the

@@ -39,6 +39,13 @@ retention_days = 30
 log_max_mb = 10
 log_keep = 3
 
+# How much history the live map carries by default. ?days=0 fetches everything.
+map_days = 7
+
+# Index cost relative to a sequential read. 4.0 is Postgres's spinning-disk
+# default; ~1.1 is right for an SSD and is what lets the planner use the index.
+random_page_cost = 1.1
+
 # What to call each car on the map's vehicle switcher. BMW streams no model name
 # anywhere in the 245 attributes, so without this a car can only be labelled by
 # the tail of its VIN. Any VIN left out falls back to that.

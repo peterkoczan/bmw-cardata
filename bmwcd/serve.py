@@ -19,6 +19,7 @@ import json
 import threading
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from . import db, export
 from .config import Config
@@ -82,20 +83,32 @@ class Handler(BaseHTTPRequestHandler):
             code,
         )
 
+    def _days(self) -> int | None:
+        """How much history to send. ?days=0 means all of it."""
+        query = parse_qs(urlparse(self.path).query)
+        raw = query.get("days", [None])[0]
+        if raw is None:
+            return self.cfg.map_days or None
+        try:
+            return int(raw) or None
+        except ValueError:
+            return self.cfg.map_days or None
+
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
-        # Ignore any query string: it is only ever a cache-buster.
-        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        path = urlparse(self.path).path.rstrip("/") or "/"
         try:
             if path == "/":
                 html = export.TEMPLATE.read_text().replace(
                     "/*__DATA__*/null",
                     json.dumps(
-                        export.build(self.cfg), separators=(",", ":"), default=str
+                        export.build(self.cfg, self._days()),
+                        separators=(",", ":"),
+                        default=str,
                     ),
                 )
                 self._send(html.encode(), "text/html; charset=utf-8")
             elif path == "/data.json":
-                self._json(export.build(self.cfg))
+                self._json(export.build(self.cfg, self._days()))
             elif path == "/stamp.json":
                 self._json(_stamp(self.cfg))
             elif path in ("/favicon.ico", "/favicon.svg"):
