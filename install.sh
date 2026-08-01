@@ -14,7 +14,12 @@ set -euo pipefail
 REPO_URL="https://github.com/peterkoczan/bmw-cardata.git"
 TARGET="${BMWCD_DIR:-$HOME/Developer/bmw-cardata}"
 PG_FORMULA="postgresql@17"
-DB_NAME="bmwcardata"
+# Overridable so the installer can be exercised end to end without going
+# anywhere near a real one. BMWCD_DB=bmwcardata_test ./install.sh
+DB_NAME="${BMWCD_DB:-bmwcardata}"
+# Set to skip loading the launchd agents -- a test run should not take over the
+# agents that are currently capturing.
+SKIP_AGENTS="${BMWCD_SKIP_AGENTS:-}"
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 info() { printf '    %s\n' "$*"; }
@@ -42,7 +47,12 @@ info "python: $("$PYTHON" --version)"
 
 # --- clone or update ---------------------------------------------------------
 
-if [ -f "$(dirname "${BASH_SOURCE[0]}")/bmwcd/__init__.py" ]; then
+# An explicit BMWCD_DIR wins over "you ran me from inside a checkout". Without
+# this, running the script by path from a real clone silently ignored the
+# directory asked for and operated on the clone instead -- which, while testing
+# the installer, pointed a scratch run straight at the live database. The schema
+# is idempotent so nothing was lost, but nothing about that was by design.
+if [ -z "${BMWCD_DIR:-}" ] && [ -f "$(dirname "${BASH_SOURCE[0]}")/bmwcd/__init__.py" ]; then
     TARGET="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     say "Using this clone: $TARGET"
 elif [ -d "$TARGET/.git" ]; then
@@ -101,6 +111,12 @@ if [ -f config.toml ]; then
     info "config.toml already present, leaving it alone"
 else
     cp config.example.toml config.toml
+    if [ "$DB_NAME" != "bmwcardata" ]; then
+        # Keep config.toml pointing at the same database the installer made.
+        sed -i.bak "s|postgresql:///bmwcardata|postgresql:///$DB_NAME|" config.toml
+        rm -f config.toml.bak
+        info "config.toml points at $DB_NAME"
+    fi
     info "config.toml created from the example (Client ID is filled in later)"
 fi
 
@@ -110,7 +126,13 @@ fi
 # --- launchd -----------------------------------------------------------------
 
 say "Background agents"
-./launchd/install.sh
+if [ -n "$SKIP_AGENTS" ]; then
+    info "BMWCD_SKIP_AGENTS set, leaving launchd alone"
+elif [ "$(uname -s)" = "Darwin" ]; then
+    ./launchd/install.sh
+else
+    ./systemd/install.sh
+fi
 
 # --- done --------------------------------------------------------------------
 

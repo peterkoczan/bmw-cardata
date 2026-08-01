@@ -1,0 +1,29 @@
+[Unit]
+Description=BMW CarData MQTT subscriber
+Documentation=https://github.com/peterkoczan/bmw-cardata
+# The feed is forward-only: anything missed while this is down is gone, so it
+# waits for the network rather than failing fast and backing off.
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python -u -m bmwcd stream
+# Always come back. Every realistic failure -- token refresh rejected, DNS gone,
+# broker dropping the connection -- is transient or fixed by a human later, and
+# neither is a reason to stay down.
+Restart=always
+RestartSec=30
+# Matches the launchd agent: journald gets stdout, the app rotates its own file.
+StandardOutput=journal
+StandardError=journal
+# It only ever needs its own directory and the network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__ROOT__
+
+[Install]
+WantedBy=default.target

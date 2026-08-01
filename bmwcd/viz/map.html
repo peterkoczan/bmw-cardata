@@ -10,6 +10,12 @@
 <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
 <title>BMW CarData — track</title>
+<meta name="description" content="Recorded BMW CarData telemetry: drives on a map coloured by drivetrain, trip breakdown, and live vehicle readings. Self-hosted, from your own car's stream.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="BMW CarData — your drives on a map">
+<meta property="og:description" content="Drives coloured by battery, petrol or recuperation, with a trip breakdown and live readings. Self-hosted BMW CarData telemetry.">
+<meta property="og:image" content="https://peterkoczan.github.io/bmw-cardata/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
 <!-- Inline, because the page is opened straight off disk: a favicon.ico sibling
      would 404 on file:// and leave the generic blank-document icon. Our own
      quartered roundel, deliberately not BMW's -- this repository is public and
@@ -929,6 +935,7 @@ function paintNow(v) {
   nowEl.hidden = !parts.length;
   for (const p of parts) nowEl.appendChild(p);
   paintAges();
+  syncAgeTimer();
 }
 
 // "8 min ago" is itself out of date a minute later, so the label is recomputed
@@ -947,7 +954,18 @@ function relativeAge(s) {
   if (s < 86400) return `${Math.round(s / 3600)}h ago`;
   return `${Math.round(s / 86400)}d ago`;
 }
-setInterval(paintAges, 30000);
+
+// Only while there is an age on screen and someone able to see it. A timer that
+// reruns every 30 seconds for a label nobody is looking at -- or that is not in
+// the DOM at all, as on the demo -- is a wakeup bought for nothing.
+let ageTimer = null;
+function syncAgeTimer() {
+  const wanted = document.visibilityState === 'visible'
+    && nowEl.querySelector('.age') !== null;
+  if (wanted && ageTimer === null) ageTimer = setInterval(paintAges, 30000);
+  else if (!wanted && ageTimer !== null) { clearInterval(ageTimer); ageTimer = null; }
+}
+document.addEventListener('visibilitychange', () => { paintAges(); syncAgeTimer(); });
 
 /* ---------- apply ---------- */
 // Only the selected car: the others are not on the map, and painting their
@@ -1036,6 +1054,11 @@ function selectVehicle(v) {
 
 function showNotes(v) {
   const parts = [...(v?.notes || []), ...(DATA?.notes || [])];
+  // A window must not pass for the whole record. Only says so when it is
+  // actually a window -- ?days=0 sends everything and gets no note.
+  if (LIVE && DATA?.window_days) {
+    parts.unshift(`showing the last ${DATA.window_days} days — ?days=0 for everything`);
+  }
   if (!vehicles.length) parts.unshift('No telemetry recorded yet.');
   const renamed = v && overrideFor(v);
   if (renamed) {
@@ -1454,7 +1477,11 @@ async function pollOnce(state) {
   state.key = key;
   if (first) return;  // the first poll only establishes the baseline
 
-  const payload = await (await fetch('data.json', { cache: 'no-store' })).json();
+  // Carry the page's own window through, so a tab opened with ?days=0 keeps
+  // getting everything instead of silently narrowing on the first update.
+  const days = new URLSearchParams(location.search).get('days');
+  const url = days === null ? 'data.json' : `data.json?days=${encodeURIComponent(days)}`;
+  const payload = await (await fetch(url, { cache: 'no-store' })).json();
   // Capture where the user is before pulling the rug out.
   ingest(payload, {
     keep: {
@@ -1506,12 +1533,21 @@ function startLive() {
     // it comes back, and a page full of error text helps nobody.
     .catch(() => liveDot.classList.add('stale'));
 
-  tick();
-  setInterval(tick, POLL_MS);
-  // Catch up immediately on waking rather than waiting out the interval.
+  // Polling stops entirely while the tab is hidden, and catches up in one go
+  // when it comes back. A tab left open on a laptop was asking for stamp.json
+  // 5,760 times a day whether or not anyone could see it; the browser throttles
+  // background timers but does not stop them, and each one still wakes this
+  // page, the server and Postgres behind it.
+  let timer = null;
+  const start = () => { if (timer === null) timer = setInterval(tick, POLL_MS); };
+  const stop = () => { clearInterval(timer); timer = null; };
+
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') tick();
+    if (document.visibilityState === 'visible') { tick(); start(); } else stop();
   });
+
+  tick();
+  if (document.visibilityState === 'visible') start();
 }
 
 /* ---------- theme ---------- */
