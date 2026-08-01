@@ -1,0 +1,11 @@
+[Unit]
+Description=Prune BMW CarData past its retention window, daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+# A laptop asleep at 04:00 should still prune when it wakes, rather than skip a
+# day and let the database grow past the window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

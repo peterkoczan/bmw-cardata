@@ -154,6 +154,7 @@ class DbSink:
                 if self.conn is None or self.conn.closed:
                     self.conn = db.connect(self.cfg)
                 db.write(self.conn, payload, self.catalogue)
+                _note_message(self.cfg)
                 if self.degraded:
                     _log("[db] reconnected")
                     self.degraded = False
@@ -243,13 +244,50 @@ def _status(cfg: Config, state: str, detail: str = "") -> None:
     indicator exists to make.
     """
     try:
-        payload = {"state": state, "detail": detail, "at": time.time()}
+        payload = {
+            "state": state,
+            "detail": detail,
+            "at": time.time(),
+            # Carried here so the indicator can tell "the car just spoke" from
+            # "the process is alive" without asking Postgres. It used to run
+            # SELECT max(ts) every ten seconds -- 8,640 wakeups a day, waking
+            # Python and Postgres both, on battery, whether or not anyone was
+            # looking at the menu bar.
+            "last_message": _LAST["at"],
+            "messages": _LAST["count"],
+        }
         path = cfg.data_dir / STATUS_FILE
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(payload))
         os.replace(tmp, path)
     except OSError:
         pass  # never let status reporting break capture
+
+
+# Last message the sink actually stored, and how many in total. Module state
+# because the sink and the heartbeat live in different places in this file and
+# a daemon with one of each does not need more ceremony than that.
+_LAST: dict[str, float | int | None] = {"at": None, "count": 0, "written": 0.0}
+
+# A burst of arrivals is hundreds of messages; rewriting the status file for
+# each would be hundreds of writes for one visible change.
+STATUS_MIN_INTERVAL = 1.0
+
+
+def _note_message(cfg: Config) -> None:
+    """Record that a message landed, and refresh the heartbeat if it is time.
+
+    Written from the drain thread so the indicator sees an arrival within its
+    own poll rather than up to a heartbeat late, which is what made the blink
+    worth having in the first place.
+    """
+    now = time.time()
+    _LAST["at"] = now
+    _LAST["count"] = int(_LAST["count"] or 0) + 1
+    if now - float(_LAST["written"] or 0) < STATUS_MIN_INTERVAL:
+        return
+    _LAST["written"] = now
+    _status(cfg, "connected")
 
 
 def _wait_for_new_tokens(limit: float = 3600.0, tick: float = 15.0) -> bool:
