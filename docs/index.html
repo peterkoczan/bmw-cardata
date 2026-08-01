@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>bmw-cardata — your BMW's telemetry, on your own machine</title>
+<meta name="description" content="Self-hosted BMW CarData telemetry. Subscribes to BMW's MQTT stream, stores everything in PostgreSQL, and draws a live map you can scrub back through. Runs on your own machine with a macOS menu bar app.">
+<link rel="canonical" href="https://peterkoczan.github.io/bmw-cardata/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="bmw-cardata — your BMW's telemetry, on your own machine">
+<meta property="og:description" content="Subscribes to BMW's CarData MQTT stream, stores it in PostgreSQL, and draws a live map of your drives. Self-hosted, no third party in the middle.">
+<meta property="og:url" content="https://peterkoczan.github.io/bmw-cardata/">
+<meta property="og:image" content="https://peterkoczan.github.io/bmw-cardata/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/svg+xml" sizes="any" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b36; --text:#e6e9ef;
+          --muted:#99a1b3; --accent:#7aa2f7; }
+  html { color-scheme: dark; }
+  @media (prefers-color-scheme: light) {
+    html { color-scheme: light; }
+    :root { --bg:#f5f6f8; --panel:#fff; --line:#dfe3ea; --text:#12151b;
+            --muted:#5b6474; --accent:#1d4ed8; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:16px/1.6 ui-sans-serif, -apple-system, "Segoe UI", sans-serif; }
+  .wrap { max-width:820px; margin:0 auto; padding:56px 22px 80px; }
+  h1 { font-size:2.1rem; line-height:1.15; margin:0 0 .4em; letter-spacing:-.02em; }
+  h2 { font-size:1.25rem; margin:2.4em 0 .6em; letter-spacing:-.01em; }
+  p { margin:0 0 1em; }
+  .lede { font-size:1.15rem; color:var(--muted); }
+  a { color:var(--accent); }
+  .cta { display:flex; gap:10px; flex-wrap:wrap; margin:1.6em 0 2em; }
+  .cta a { display:inline-block; padding:10px 16px; border-radius:8px;
+    background:var(--panel); border:1px solid var(--line); text-decoration:none;
+    color:var(--text); font-weight:600; font-size:.95rem; }
+  .cta a.primary { background:var(--accent); border-color:transparent; color:#fff; }
+  .cta a:hover { border-color:var(--accent); }
+  img.shot { width:100%; border-radius:10px; border:1px solid var(--line); display:block; }
+  figure { margin:0 0 1.2em; }
+  figcaption { color:var(--muted); font-size:.85rem; padding-top:.5em; }
+  ul { padding-left:1.1em; }
+  li { margin:.35em 0; }
+  code { background:var(--panel); border:1px solid var(--line); border-radius:5px;
+    padding:1px 5px; font-size:.9em; }
+  pre { background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:12px 14px; overflow-x:auto; }
+  pre code { background:none; border:0; padding:0; }
+  .note { color:var(--muted); font-size:.9rem; }
+  footer { margin-top:3em; padding-top:1.4em; border-top:1px solid var(--line);
+    color:var(--muted); font-size:.9rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Your BMW's telemetry, on your own machine</h1>
+
+<p class="lede">BMW's CarData gives you a live MQTT stream of what your car
+reports. This subscribes to it, writes everything to disk, puts it in PostgreSQL,
+and draws a map you can scrub back through. No third party in the middle.</p>
+
+<div class="cta">
+  <a class="primary" href="https://github.com/peterkoczan/bmw-cardata">Source on GitHub</a>
+  <a href="demo.html">Live demo</a>
+  <a href="setup.html">Linking your car</a>
+</div>
+
+<figure>
+  <a href="demo.html"><img class="shot" src="screenshot.png"
+     alt="The map page: a route through Amsterdam coloured by drivetrain mode, with a vehicle switcher, date and trip pickers, a timeline scrubber and a grid of live readings."></a>
+  <figcaption>The map, running against invented data — <a href="demo.html">try it</a>.</figcaption>
+</figure>
+
+<h2>What it does</h2>
+<ul>
+  <li>Subscribes to the CarData MQTT stream over TLS and captures every message.</li>
+  <li>Keeps the raw JSONL as the source of truth, and loads it into PostgreSQL.</li>
+  <li>Draws your drives on a map, coloured by whether you were on battery, on
+      petrol, or recovering energy.</li>
+  <li>Splits a day's fixes into separate trips, with distance, duration and
+      consumption for each.</li>
+  <li>Updates live while you drive — the page follows the car without a refresh.</li>
+  <li>Runs in the background with a macOS menu bar icon that says whether it is
+      actually working, not merely running.</li>
+</ul>
+
+<h2>What you need</h2>
+<ul>
+  <li>A BMW with CarData, and a My BMW account where you are the
+      <strong>primary user</strong>. CarData streaming is EU-only at present.</li>
+  <li>macOS for the menu bar app and launchd agents. The core — auth, the MQTT
+      client, the database, the map — is plain Python and runs anywhere.</li>
+  <li>Python 3.11+ and PostgreSQL 14+. The installer sets up Postgres for you.</li>
+</ul>
+
+<pre><code>curl -fsSL https://raw.githubusercontent.com/peterkoczan/bmw-cardata/main/install.sh | bash</code></pre>
+
+<p class="note">You never give this your BMW password. You sign in on BMW's own
+site and approve a code — see <a href="setup.html">linking your car</a>.</p>
+
+<h2>How much your car tells you</h2>
+<p>Depends on the car. Mine has Live Cockpit Professional and reports its position
+every few minutes while driving; Live Cockpit Plus only reports at the start and
+end of a trip. BMW also offers far more attributes than it actually sends — of
+245 streamable keys selected, about 75 have ever arrived. That is BMW's choice,
+not a setting.</p>
+
+<footer>
+  MIT licensed. Not affiliated with or endorsed by BMW.
+  <a href="https://github.com/peterkoczan/bmw-cardata">github.com/peterkoczan/bmw-cardata</a>
+</footer>
+
+</div>
+</body>
+</html>

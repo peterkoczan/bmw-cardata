@@ -18,12 +18,23 @@ def connect(cfg: Config, connect_timeout: int = 10, statement_timeout_ms: int = 
     the UI thread and freezes the very indicator you opened to diagnose it.
     Callers that must stay responsive pass short timeouts; bulk paths do not.
     """
-    options = f"-c statement_timeout={statement_timeout_ms}" if statement_timeout_ms else ""
+    # random_page_cost defaults to 4.0, a ratio that describes a spinning disk
+    # having to seek. On the SSD this actually runs on, an index scan costs
+    # roughly what a sequential one does, and at 4.0 the planner refuses the
+    # index for anything touching a decent fraction of the table.
+    #
+    # It was refusing it for the biggest query in the app. Reading a vehicle's
+    # whole history was a sequential scan plus a 12,800-row quicksort at 54 ms;
+    # with the cost corrected the planner picks the index, drops the sort, and
+    # the same query is 8.7 ms. That gap widens with every row added.
+    settings = [f"-c random_page_cost={cfg.random_page_cost}"]
+    if statement_timeout_ms:
+        settings.append(f"-c statement_timeout={statement_timeout_ms}")
     return psycopg.connect(
         cfg.dsn,
         autocommit=True,
         connect_timeout=connect_timeout,
-        **({"options": options} if options else {}),
+        options=" ".join(settings),
     )
 
 

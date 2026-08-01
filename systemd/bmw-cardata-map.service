@@ -1,0 +1,22 @@
+[Unit]
+Description=BMW CarData live map (127.0.0.1 only)
+Documentation=https://github.com/peterkoczan/bmw-cardata
+After=postgresql.service
+
+[Service]
+Type=simple
+WorkingDirectory=__ROOT__
+ExecStart=__ROOT__/.venv/bin/python -m bmwcd serve
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=__ROOT__
+# Loopback only; nothing here should be reachable off the machine.
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+[Install]
+WantedBy=default.target

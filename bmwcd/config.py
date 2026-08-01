@@ -24,6 +24,16 @@ class Config:
         # Local port for the live map, served by the menu bar app on 127.0.0.1.
         # 0 picks a free one, at the cost of the URL moving between restarts.
         self.map_port: int = int(raw.get("map_port", 8770))
+        # What an index lookup costs relative to a sequential read. Postgres
+        # ships 4.0, which describes a disk that has to seek; on an SSD it is
+        # close to 1. Left at the default the planner will not use the index for
+        # the map's biggest query. Raise it if you are genuinely on spinning rust.
+        self.random_page_cost: float = float(raw.get("random_page_cost", 1.1))
+        # How much history the live map carries by default. The page reloads the
+        # whole payload on every update, so with a month of retention it would
+        # be shipping and re-parsing megabytes every time the car reports.
+        # A week covers "what have I been doing lately"; ?days=0 fetches the lot.
+        self.map_days: int = int(raw.get("map_days", 7))
         # Logs are rotated on size, not age: the stream prints a line per
         # message, so volume tracks how much you drive rather than the calendar.
         self.log_max_mb: float = float(raw.get("log_max_mb", 10))

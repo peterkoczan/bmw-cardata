@@ -32,6 +32,8 @@ STALE_AFTER = 6 * 3600
 
 ICONS = Path(__file__).resolve().parent.parent / "assets" / "icons"
 
+SETUP_GUIDE_URL = "https://peterkoczan.github.io/bmw-cardata/setup.html"
+
 PORTAL_STEPS = """Set this up in the My BMW portal first (about 3 minutes).
 
 1. Sign in at bmw.<your country> → account menu → Vehicle overview.
@@ -50,6 +52,9 @@ PORTAL_STEPS = """Set this up in the My BMW portal first (about 3 minutes).
 
 Do NOT click "Authenticate device" in the portal. This app runs
 that step itself.
+
+Full walkthrough with the gotchas:
+https://peterkoczan.github.io/bmw-cardata/setup.html
 
 Now paste the Client ID below."""
 
@@ -111,6 +116,10 @@ def _human_age(seconds: float) -> str:
 # A heartbeat older than this means the subscriber is not maintaining it, even
 # if the process is alive. It refreshes every 30s while connected.
 HEARTBEAT_STALE = 120
+
+# How often to repeat "stream down" while it stays down. Once was not enough:
+# the notification that mattered was missed, and nothing said it again for a day.
+DOWN_REMINDER_SECONDS = 3600
 
 
 class Status:
@@ -187,12 +196,24 @@ class Status:
         return f"Stream: running but not connected (pid {self.stream_pid})"
 
 
-def _read_heartbeat(cfg) -> tuple[str, str, float | None]:
+def _read_heartbeat(cfg) -> dict:
+    """The stream's own view of itself: state, age, and when the car last spoke.
+
+    Everything the indicator needs on its fast tick comes from this one small
+    file, so the common case costs a read of a few hundred bytes instead of a
+    round trip to Postgres.
+    """
     try:
         body = json.loads((cfg.data_dir / "stream.status").read_text())
-        return body.get("state", ""), body.get("detail", ""), time.time() - float(body["at"])
+        return {
+            "state": body.get("state", ""),
+            "detail": body.get("detail", ""),
+            "age": time.time() - float(body["at"]),
+            "last_message": body.get("last_message"),
+            "messages": body.get("messages") or 0,
+        }
     except (OSError, ValueError, KeyError, TypeError):
-        return "", "", None
+        return {"state": "", "detail": "", "age": None, "last_message": None, "messages": 0}
 
 
 def poll(cfg, with_counts: bool = True) -> Status:
@@ -209,23 +230,35 @@ def poll(cfg, with_counts: bool = True) -> Status:
 
     if cfg is None:
         return st
-    st.stream_state, st.stream_detail, st.heartbeat_age = _read_heartbeat(cfg)
+    beat = _read_heartbeat(cfg)
+    st.stream_state = beat["state"]
+    st.stream_detail = beat["detail"]
+    st.heartbeat_age = beat["age"]
+    # From the file, not the database. The stream stamps this the moment it
+    # stores a message, so the blink is as prompt as it ever was while the fast
+    # tick no longer touches Postgres at all.
+    if beat["last_message"]:
+        st.last_message = datetime.fromtimestamp(beat["last_message"], timezone.utc)
 
-    # Short timeouts: this runs on the UI thread, and an unbounded wait here
-    # freezes the menu bar item itself.
+    # The row counts are the only thing left that needs a query, and they are
+    # cosmetic, so they ride the slow cadence. Short timeouts because this runs
+    # on the UI thread and an unbounded wait freezes the indicator itself.
+    if not with_counts:
+        # Believe the heartbeat about the database too: the stream reports
+        # "connected" only while it is storing what it receives.
+        st.db_up = st.stream_state in {"connected", ""} or st.db_up
+        return st
     try:
         with db.connect(cfg, connect_timeout=3, statement_timeout_ms=4000) as conn:
-            if with_counts:
-                row = conn.execute(
-                    "SELECT max(ts), count(*), count(DISTINCT key) FROM telemetry"
-                ).fetchone()
-                st.rows, st.keys = (row[1], row[2]) if row else (0, 0)
-            else:
-                # max(ts) alone is an index-only scan; the counts are seq scans,
-                # so they run on a slower cadence.
-                row = conn.execute("SELECT max(ts) FROM telemetry").fetchone()
+            row = conn.execute(
+                "SELECT max(ts), count(*), count(DISTINCT key) FROM telemetry"
+            ).fetchone()
+            st.rows, st.keys = (row[1], row[2]) if row else (0, 0)
         st.db_up = True
-        st.last_message = row[0].astimezone(timezone.utc) if row and row[0] else None
+        # The database is authoritative when we have asked it; the heartbeat is
+        # only a stand-in between asks.
+        if row and row[0]:
+            st.last_message = row[0].astimezone(timezone.utc)
     except Exception as exc:  # noqa: BLE001 - the indicator must never crash
         st.db_up = False
         first = str(exc).strip().splitlines()
@@ -254,6 +287,7 @@ class App(rumps.App):
             rumps.MenuItem("Open map", callback=self.open_map),
             None,
             rumps.MenuItem("Set up / re-authorise…", callback=self.setup),
+            rumps.MenuItem("Setup guide (web)", callback=self.open_guide),
             self.item_rename,
             self.item_retention,
             None,
@@ -314,12 +348,24 @@ class App(rumps.App):
             self._blink()
         self._last_seen_message = st.last_message
 
-        # Tell the user the moment it breaks. A red glyph nobody is looking at
-        # is worth no more than no glyph, and the data is unrecoverable.
-        was = getattr(self, "_was_connected", None)
-        if was is True and st.authorised and not st.connected:
-            self._note("Stream down", st.stream_summary)
-        self._was_connected = st.connected if st.authorised else None
+        # Tell the user it is broken, not merely that it broke. This only fired
+        # on a transition observed by *this* process, so an indicator that
+        # started up with the stream already down said nothing at all and just
+        # sat red -- and restarting the indicator wiped the memory that would
+        # have made it speak. The stream was dead for 29 hours behind exactly
+        # that gap. Now: say it once on discovery, then keep saying it hourly,
+        # because a notification missed while away is a notification wasted.
+        if st.authorised and not st.connected:
+            since = getattr(self, "_down_since", None) or time.monotonic()
+            self._down_since = since
+            last = getattr(self, "_down_notified", None)
+            if last is None or time.monotonic() - last >= DOWN_REMINDER_SECONDS:
+                self._down_notified = time.monotonic()
+                down_for = _human_age(time.monotonic() - since) if last else "just now"
+                self._note("Stream down", f"{st.stream_summary} ({down_for})")
+        else:
+            self._down_since = None
+            self._down_notified = None
 
         self.item_stream.title = st.stream_summary
 
@@ -704,6 +750,10 @@ class App(rumps.App):
         except Exception as exc:  # noqa: BLE001
             return self._note("Could not build the map", str(exc))
         _sh("open", str(page))
+
+    def open_guide(self, _):
+        """The written walkthrough, which has room for the parts a dialog cannot."""
+        webbrowser.open(SETUP_GUIDE_URL)
 
     def open_log(self, _):
         base = self.cfg.data_dir if self.cfg else config.ROOT / "data"
