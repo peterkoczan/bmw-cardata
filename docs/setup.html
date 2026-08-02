@@ -70,6 +70,12 @@
   figcaption { color:var(--muted); font-size:.85rem; padding-top:.45em; }
   footer { margin-top:3em; padding-top:1.4em; border-top:1px solid var(--line);
     color:var(--muted); font-size:.9rem; }
+
+  /* Standalone links are navigation and need a real target on a phone: these
+     were 17px tall against a 24px minimum. Padding expands the hit area without
+     moving anything visually. */
+  footer a, .cta a, .back { display:inline-block; padding:9px 2px; }
+  footer { line-height:2.1; }
 </style>
 </head>
 <body>
