@@ -270,8 +270,8 @@ everywhere:
 
 ```toml
 [names]
-"WBA41EU0209Y65714" = "X5"
-"WBY1Z61020V937588" = "i3"
+"WBAXXXXXXXXXXXXXX" = "X5"
+"WBYXXXXXXXXXXXXXX" = "i3"
 ```
 
 Keep that block at the bottom of the file — everything after a TOML table header

@@ -7,6 +7,7 @@ whatever happened to arrive first.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -146,7 +147,12 @@ def cache_path(cfg: Config) -> Path:
 def save(cfg: Config, items: list[dict]) -> Path:
     path = cache_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(items, indent=2))
+    # Write-then-rename, as stream.py does for the heartbeat. A bare write_text
+    # leaves a truncated file if the process dies mid-write, and a truncated
+    # catalogue is not a degraded catalogue -- see load().
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(items, indent=2))
+    os.replace(tmp, path)
     return path
 
 
@@ -154,7 +160,17 @@ def load(cfg: Config) -> dict[str, dict]:
     path = cache_path(cfg)
     if not path.exists():
         return {}
-    return {e["id"]: e for e in json.loads(path.read_text()) if e.get("id")}
+    try:
+        items = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        # Degrade to the same state as "not fetched yet". DbSink is constructed
+        # outside run()'s try block, so raising here killed the stream agent
+        # before the retry loop existed -- launchd then respawned it every 30
+        # seconds forever, with the decode error as the only clue.
+        return {}
+    if not isinstance(items, list):
+        return {}
+    return {e["id"]: e for e in items if isinstance(e, dict) and e.get("id")}
 
 
 def load_into_db(cfg: Config, items: list[dict]) -> int:
