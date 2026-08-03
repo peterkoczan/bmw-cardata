@@ -4,7 +4,9 @@ Raw JSONL is written first and is the source of truth: the feed is forward-only,
 so anything not captured at the moment it arrives is gone for good.
 """
 
+import binascii
 import fcntl
+import functools
 import json
 import os
 import queue
@@ -96,15 +98,28 @@ def _topics(cfg: Config, gcid: str) -> list[str]:
     return [f"{gcid}/+"]
 
 
+# Substrings marking a value as precise personal location. The progress log is
+# rotated on size only -- retention_days governs the database and the raw JSONL,
+# neither of which this is -- so a coordinate written here outlives every
+# retention window the user believes they set, and on Linux it is copied into
+# journald as well. The coordinates are still captured; they live in the raw
+# JSONL and the database, which are both pruned by age.
+_REDACT_KEYS = ("latitude", "longitude", "location")
+
+
 def _summarise(body) -> str:
     """One terse line per message so a live tail is actually readable."""
     if not isinstance(body, dict):
         return str(body)[:160]
     data = body.get("data")
     if isinstance(data, dict):
-        return " ".join(
-            f"{k}={v.get('value') if isinstance(v, dict) else v}" for k, v in data.items()
-        )[:200]
+        parts = []
+        for key, raw in data.items():
+            value = raw.get("value") if isinstance(raw, dict) else raw
+            if any(token in key.lower() for token in _REDACT_KEYS):
+                value = "<redacted>"
+            parts.append(f"{key}={value}")
+        return " ".join(parts)[:200]
     return json.dumps(body, separators=(",", ":"))[:200]
 
 
@@ -140,6 +155,7 @@ class DbSink:
             self.queue.put_nowait(payload)
         except queue.Full:
             self.dropped += 1
+            _DB_HEALTH["dropped"] = self.dropped
             if self.dropped % 100 == 1:
                 _log(f"[db] queue full, {self.dropped} message(s) not stored "
                       f"(raw JSONL intact; repair with: bmwcd load)")
@@ -154,14 +170,13 @@ class DbSink:
                 if self.conn is None or self.conn.closed:
                     self.conn = db.connect(self.cfg)
                 db.write(self.conn, payload, self.catalogue)
-                _note_message(self.cfg)
                 if self.degraded:
                     _log("[db] reconnected")
-                    self.degraded = False
+                    self.degraded = _DB_HEALTH["degraded"] = False
             except Exception as exc:  # noqa: BLE001 - never let the DB break capture
                 if not self.degraded:
                     _log(f"[db] unavailable, raw capture continues: {exc}")
-                    self.degraded = True
+                    self.degraded = _DB_HEALTH["degraded"] = True
                 self.conn = None
                 time.sleep(1.0)  # do not spin against a down database
             finally:
@@ -255,6 +270,8 @@ def _status(cfg: Config, state: str, detail: str = "") -> None:
             # looking at the menu bar.
             "last_message": _LAST["at"],
             "messages": _LAST["count"],
+            "degraded": _DB_HEALTH["degraded"],
+            "dropped": _DB_HEALTH["dropped"],
         }
         path = cfg.data_dir / STATUS_FILE
         tmp = path.with_suffix(".tmp")
@@ -268,6 +285,12 @@ def _status(cfg: Config, state: str, detail: str = "") -> None:
 # because the sink and the heartbeat live in different places in this file and
 # a daemon with one of each does not need more ceremony than that.
 _LAST: dict[str, float | int | None] = {"at": None, "count": 0, "written": 0.0}
+
+# Storage health, published alongside it. Capture and storage fail
+# independently -- the raw JSONL is the source of truth and keeps going with
+# Postgres down -- so the indicator needs both to tell "the car is quiet" from
+# "the database is refusing writes". Module state, for the same reason as _LAST.
+_DB_HEALTH: dict[str, object] = {"degraded": False, "dropped": 0}
 
 # A burst of arrivals is hundreds of messages; rewriting the status file for
 # each would be hundreds of writes for one visible change.
@@ -356,7 +379,31 @@ def run(cfg: Config, store: TokenStore) -> None:
         while True:
             try:
                 tokens = store.fresh()
+            except (json.JSONDecodeError, ValueError, KeyError, binascii.Error) as exc:
+                # A corrupt or truncated tokens.json. These escape both
+                # AuthRetryable and SystemExit, so they left run() entirely and
+                # exited the process -- which launchd respawned every 30s
+                # forever. Park like an expired credential: re-authorising from
+                # the menu bar rewrites the file and the stream heals itself.
+                _log(f"[auth] tokens.json unreadable ({exc!r}); re-authorise")
+                _status(cfg, "needs_auth", "tokens.json is corrupt")
+                if not _wait_for_new_tokens():
+                    _log("[auth] still no new credentials; retrying anyway")
+                continue
+
             except AuthRetryable as exc:
+                # Nothing reached BMW, so this is not evidence of a problem at
+                # either end -- and this path runs *before* _session, so it is
+                # the one that fires first when a laptop wakes with the token
+                # already expired and wifi not yet up. Without the same
+                # short-circuit the MQTT path has, twenty minutes offline
+                # climbed the ladder to its 10-minute floor and kept the stream
+                # down for that long after the network came back.
+                if not _have_network():
+                    _log(f"[auth] no network; retrying in {OFFLINE_RETRY:.0f}s")
+                    _status(cfg, "offline", "waiting for network")
+                    time.sleep(OFFLINE_RETRY)
+                    continue
                 # Transient: a blip at refresh time must not kill the process
                 # and hand launchd a crash loop against BMW's auth endpoint.
                 failures += 1
@@ -475,9 +522,15 @@ def _session(
             down.set()
 
     def on_disconnect(client, userdata, flags, reason_code, properties=None):
-        _log(f"[mqtt] disconnected: {reason_code}")
-        state["reason"] = int(getattr(reason_code, "value", reason_code) or 0)
+        # down.set() FIRST. Everything after it can raise -- a _log write is a
+        # print to a launchd-held descriptor and hits OSError on a full disk --
+        # and paho re-raises, which kills its own network thread with the event
+        # never set. The session then blocks in down.wait() for the rest of the
+        # token window, keeps publishing "connected" every 30s, and finally
+        # returns a *clean* cycle, which resets the supervisor's failure count.
         down.set()
+        state["reason"] = int(getattr(reason_code, "value", reason_code) or 0)
+        _log(f"[mqtt] disconnected: {reason_code}")
 
     def on_message(client, userdata, msg):
         # Guarded because paho re-raises callback exceptions and nothing between
@@ -487,6 +540,12 @@ def _session(
         # also resets the supervisor's failure counter. Fail loudly instead.
         try:
             body = sink.write(msg.topic, msg.payload)  # durable first
+            # Noted here, on the durable raw write, rather than after the
+            # database insert. Keyed off the insert it reported Postgres health
+            # as stream health: with the database down, capture continued
+            # perfectly while last_message froze, so the indicator showed a car
+            # that had gone silent for hours when it was streaming fine.
+            _note_message(cfg)
             if isinstance(body, dict):
                 dbsink.write(body)  # enqueue only; never block this thread
             _log(_summarise(body))
@@ -505,10 +564,34 @@ def _session(
     ctx = ssl.create_default_context(cafile=certifi.where())
     ctx.minimum_version = ssl.TLSVersion.TLSv1_3  # BMW no longer accepts 1.2
     client.tls_set_context(ctx)
-    client.on_connect = on_connect
-    client.on_subscribe = on_subscribe
-    client.on_disconnect = on_disconnect
-    client.on_message = on_message
+    def _guard(fn):
+        """Never let a callback exception reach paho.
+
+        paho's suppress_exceptions defaults to False and it re-raises from every
+        callback site; the exception then unwinds through its network thread's
+        main, which only clears the thread handle. on_message was already
+        wrapped -- these three were not, so a single raising _log left a dead
+        network thread behind a session that still looked healthy.
+        """
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                try:
+                    _log(f"[mqtt] {fn.__name__} raised: {exc!r}")
+                except Exception:  # noqa: BLE001 - logging must not be fatal here
+                    pass
+                state["reason"] = None
+                down.set()
+        return wrapper
+
+    # Belt and braces: even a raise from inside _guard's own handler is absorbed.
+    client.suppress_exceptions = True
+    client.on_connect = _guard(on_connect)
+    client.on_subscribe = _guard(on_subscribe)
+    client.on_disconnect = _guard(on_disconnect)
+    client.on_message = _guard(on_message)
 
     hold = max(60.0, tokens.seconds_left() - REFRESH_MARGIN)
     _log(f"[mqtt] connecting; token good for {int(tokens.seconds_left())}s")
@@ -545,6 +628,7 @@ def _session(
             )
             if remaining <= 0:
                 _log("[mqtt] token refresh due; cycling connection")
+                state["cycling"] = True
                 return True, None, True
 
             wall_before, mono_before = time.time(), time.monotonic()
@@ -562,6 +646,7 @@ def _session(
             # step, which moves both clocks' *difference* not at all.
             if wall_elapsed - mono_elapsed > 60:
                 _log(f"[mqtt] resumed after {wall_elapsed / 60:.0f}m suspended; cycling")
+                state["cycling"] = True
                 return True, None, _productive(state)
             if woke:
                 return False, state["reason"], _productive(state)
@@ -572,6 +657,11 @@ def _session(
             for name in logs.rotate_all(cfg):
                 _log(f"[logs] rotated {name}")
     finally:
-        _status(cfg, "disconnected")
+        # "cycling", not "disconnected", when the teardown is the orderly hourly
+        # token refresh or a resume. The menu bar polls every 10 seconds and
+        # notifies the moment it sees a stream that is not connected, so writing
+        # "disconnected" on the clean path produced roughly 24 false "Stream
+        # down" alerts a day for a stream that never actually failed.
+        _status(cfg, "cycling" if state.get("cycling") else "disconnected")
         client.disconnect()
         client.loop_stop()

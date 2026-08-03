@@ -80,6 +80,13 @@ APPROX_BELOW_KM = 5.0
 # would be inventing the very number that is missing.
 ELECTRIC_UNMEASURED_INTENSITY = 0.22
 
+# How long a charging signal stands before it stops meaning anything. BMW
+# reports charging power and HV state while charging and then simply stops --
+# there is no closing zero -- so without a bound the last value latches and
+# every subsequent rising-SoC leg is read as "still plugged in" rather than as
+# recuperation.
+CHARGE_STALE_AFTER = timedelta(minutes=15)
+
 # Derived speed is only close to the truth while the car cannot have gone far
 # off the straight line between two fixes. Past this the figure is still a valid
 # floor, but a weak one, so it is labelled rough rather than quoted plainly.
@@ -122,9 +129,21 @@ class Series:
     def __bool__(self):
         return bool(self.times)
 
-    def at(self, when):
+    def at(self, when, max_age=None):
+        """The newest value at or before `when`, optionally bounded by age.
+
+        An unbounded as-of lookup holds the last reading forever. That is right
+        for an odometer, which only ever moves forward, and wrong for anything
+        that stops being reported rather than going to zero: BMW never sends a
+        0 W charging power, so the last non-null value stood for the rest of the
+        window and the car read as permanently plugged in.
+        """
         idx = bisect.bisect_right(self.times, when) - 1
-        return self.values[idx] if idx >= 0 else None
+        if idx < 0:
+            return None
+        if max_age is not None and (when - self.times[idx]) > max_age:
+            return None
+        return self.values[idx]
 
 
 def _series(conn, vin: str, key: str, column: str = "num") -> Series:
@@ -175,8 +194,8 @@ def _segment(prev_t, t, s, gps_km):
     soc0, soc1 = s["soc"].at(prev_t), s["soc"].at(t)
     d_soc = (soc1 - soc0) if (soc0 is not None and soc1 is not None) else None
 
-    hv = (s["hv"].at(t) or "") if s["hv"] else ""
-    power = s["charge_power"].at(t) if s["charge_power"] else None
+    hv = (s["hv"].at(t, CHARGE_STALE_AFTER) or "") if s["hv"] else ""
+    power = s["charge_power"].at(t, CHARGE_STALE_AFTER) if s["charge_power"] else None
     plugged = hv.upper() in {"CHARGING", "WAITING_FOR_CHARGING"} or bool(power)
 
     # Charge climbing while moving and not plugged in is recuperation. This one
@@ -199,10 +218,21 @@ def _attribute_trips(points, trips, s):
     by_trip = {t["trip"]: t for t in trips}
 
     for trip in trips:
-        legs = [p for p in points if p.get("trip") == trip["trip"] and p.get("draw")]
-        if not legs:
+        fixes = [p for p in points if p.get("trip") == trip["trip"]]
+        if not fixes:
             continue
-        start, end = min(p["ts"] for p in legs), max(p["ts"] for p in legs)
+        legs = [p for p in fixes if p.get("draw")]
+
+        # Span the trip's own fixes, not just the drawn legs. `draw` is false on
+        # the leading fix and on every trailing stationary one, so measuring
+        # between the first and last *leg* covers a strictly shorter window than
+        # the trip actually took: the odometer and SoC deltas both come out
+        # short and consumption is overstated. On live data this reported
+        # 34.7 kWh/100km for a trip that did 26.0, and a two-fix trip landed on
+        # start == end, which can never yield a distance at all. `legs` is still
+        # the right set for gps_km -- that is a sum of per-hop distances, and
+        # the undrawn hops are the ones that did not move.
+        start, end = min(p["ts"] for p in fixes), max(p["ts"] for p in fixes)
         gps_km = sum(p.get("km") or 0.0 for p in legs)
 
         # Odometer for the trip total, GPS only as a fallback. Straight lines
@@ -332,6 +362,23 @@ def _state_series(conn, vin: str, since) -> dict:
 
     out: dict[str, dict] = {}
     last: dict[str, object] = {}
+
+    if since:
+        # Seed from each key's newest value *before* the window. Without this
+        # `last` starts empty, so the first in-window sample of every key looks
+        # like a change: a fuel level that had not moved in four days was
+        # reported as changing at the window edge, and every near-static key --
+        # doors, tyre targets, charge limits -- was silently clamped to "since"
+        # instead of to when it actually last moved.
+        for key, num, bool_, txt in conn.execute(
+            "SELECT DISTINCT ON (key) key, num, bool, txt FROM telemetry"
+            " WHERE vin=%s AND ts < %s ORDER BY key, ts DESC",
+            (vin, since),
+        ).fetchall():
+            value = bool_ if bool_ is not None else (num if num is not None else txt)
+            if value is not None:
+                last[key] = value
+
     for key, ts, num, bool_, txt, unit in rows:
         # Prefer the typed value; fall back to text for genuine enums.
         value = bool_ if bool_ is not None else (num if num is not None else txt)

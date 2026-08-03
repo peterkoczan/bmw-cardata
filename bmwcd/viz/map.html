@@ -21,8 +21,16 @@
      quartered roundel, deliberately not BMW's -- this repository is public and
      theirs is a registered trademark. -->
 <link rel="icon" type="image/svg+xml" sizes="any" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%230f1115'/%3E%3Cpath d='M32 4a28 28 0 0 1 28 28H32z' fill='%233b82f6'/%3E%3Cpath d='M32 32h28a28 28 0 0 1-28 28z' fill='%23e6e9ef'/%3E%3Cpath d='M32 32v28A28 28 0 0 1 4 32z' fill='%233b82f6'/%3E%3Cpath d='M4 32A28 28 0 0 1 32 4v28z' fill='%23e6e9ef'/%3E%3Ccircle cx='32' cy='32' r='30' fill='none' stroke='%230f1115' stroke-width='5'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<!-- Pinned by hash, not just by version. A substituted script here would run on
+     the http://127.0.0.1:8770 origin, where fetch('data.json') already succeeds:
+     every GPS fix and both VINs are readable from it. With integrity set the
+     browser refuses to execute anything whose bytes do not match. -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+      crossorigin="anonymous">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+        crossorigin="anonymous"></script>
 <style>
   :root {
     --bg: #0f1115; --panel: #171a21; --line: #262b36;
@@ -1015,7 +1023,7 @@ const legendEl = document.getElementById('legend');
 const notesEl = document.getElementById('notes');
 const buttons = new Map();
 
-function selectVehicle(v) {
+function selectVehicle(v, { fit = true } = {}) {
   if (!v) return;
   const previous = current;
   current = v;
@@ -1049,7 +1057,7 @@ function selectVehicle(v) {
   // deferred fit.
   focus = { date: null, trip: null };
   buildDatePicker(v);
-  setFocus({});
+  setFocus({}, { fit });
 }
 
 function showNotes(v) {
@@ -1104,6 +1112,11 @@ const labelOf = v => overrideFor(v)?.name || exportedLabel(v);
 // data. Left alone they are harmless but permanent: ignored on every read, and
 // still sitting there years later.
 function pruneOverrides() {
+  // Never prune against an empty vehicle list. An empty `vehicles` means the
+  // payload did not arrive -- a 500 from the map server, a failed fetch -- not
+  // that every car vanished. Pruning there deletes every stored rename and
+  // persists {}, silently and unrecoverably.
+  if (!vehicles.length) return;
   const live = new Set(vehicles.map(v => v.vin));
   let pruned = false;
   for (const [vin, o] of Object.entries(overrides)) {
@@ -1332,7 +1345,11 @@ function applyFocusToGeometry(v) {
   }
 }
 
-function setFocus(next, { rebuildTrips = true } = {}) {
+// `fit` exists for the live-update path. The fit is queued two frames out, so
+// it lands *after* ingest has synchronously restored the user's pan/zoom and
+// silently overwrites it -- which made the whole userMoved/keep.view mechanism
+// a no-op and yanked the map back to route bounds every 15 seconds.
+function setFocus(next, { rebuildTrips = true, fit = true } = {}) {
   focus = { ...focus, ...next };
   const v = current;
   if (rebuildTrips) buildTripPicker(v);
@@ -1350,7 +1367,7 @@ function setFocus(next, { rebuildTrips = true } = {}) {
   hideHover();
   apply(+slider.value);
   if (!applyingUrl) writeUrl({ push: true });
-  afterLayout(() => fitToVehicle(v));
+  if (fit) afterLayout(() => fitToVehicle(v));
 }
 
 /* ---------- the URL is the state ---------- */
@@ -1364,7 +1381,13 @@ function urlState() {
 }
 
 function writeUrl({ push = false } = {}) {
-  const p = new URLSearchParams();
+  // Seed from the current query and clear only the keys this function owns, so
+  // params it does not own survive. ?days= is read back out of location.search
+  // on every poll: rebuilding from an empty URLSearchParams dropped it on the
+  // first write, so a ?days=0 tab silently fell back to the default window and
+  // a reload lost it entirely.
+  const p = new URLSearchParams(location.search);
+  for (const key of ['car', 'date', 'trip']) p.delete(key);
   if (current) p.set('car', current.vin);
   if (focus.date) p.set('date', focus.date);
   if (focus.trip != null) p.set('trip', String(focus.trip));
@@ -1429,33 +1452,45 @@ function ingest(payload, { keep = null } = {}) {
   showNotes(current);
   if (!current) return;
 
-  selectVehicle(current);
-  if (!keep) {
-    if (fromUrl?.date || fromUrl?.trip != null) {
-      applyingUrl = true;
-      try { setFocus({ date: fromUrl.date, trip: fromUrl.trip }); }
-      finally { applyingUrl = false; }
+  // A live update is the page reloading itself, not a user decision, so nothing
+  // below may touch history. Without this the keep path pushed two entries per
+  // update -- one from selectVehicle's own setFocus, one from the focus restore
+  // -- roughly 480 an hour with a filter active, after which Back no longer
+  // undoes a filter or leaves the page, and Safari starts rate-limiting.
+  if (keep) applyingUrl = true;
+  try {
+    // Suppress the queued fit when a view is about to be restored, or it lands
+    // two frames later and overwrites it.
+    selectVehicle(current, { fit: !keep?.view });
+    if (!keep) {
+      if (fromUrl?.date || fromUrl?.trip != null) {
+        applyingUrl = true;
+        try { setFocus({ date: fromUrl.date, trip: fromUrl.trip }); }
+        finally { applyingUrl = false; }
+      }
+      writeUrl();
+      return;
     }
-    writeUrl();
-    return;
-  }
 
-  // Put the view back where the user had it. selectVehicle resets the filter,
-  // which is right when *they* switch cars and wrong when the page reloaded
-  // itself underneath them.
-  const days = new Set([...dateSel.options].map(o => o.value));
-  const date = days.has(keep.date) ? keep.date : null;
-  const trip = keep.trip != null && tripById(current, keep.trip) ? keep.trip : null;
-  if (date || trip != null) setFocus({ date, trip });
+    // Put the view back where the user had it. selectVehicle resets the filter,
+    // which is right when *they* switch cars and wrong when the page reloaded
+    // itself underneath them.
+    const days = new Set([...dateSel.options].map(o => o.value));
+    const date = days.has(keep.date) ? keep.date : null;
+    const trip = keep.trip != null && tripById(current, keep.trip) ? keep.trip : null;
+    if (date || trip != null) setFocus({ date, trip }, { fit: !keep.view });
 
-  // Scrubbed to a moment: hold that moment. Parked at the end: follow the end,
-  // which is the whole point of leaving the page open.
-  if (!keep.atLatest && keep.t != null) {
-    const idx = allTimes.findIndex(x => x >= keep.t);
-    slider.value = idx < 0 ? slider.max : idx;
-    apply(+slider.value);
+    // Scrubbed to a moment: hold that moment. Parked at the end: follow the end,
+    // which is the whole point of leaving the page open.
+    if (!keep.atLatest && keep.t != null) {
+      const idx = allTimes.findIndex(x => x >= keep.t);
+      slider.value = idx < 0 ? slider.max : idx;
+      apply(+slider.value);
+    }
+    if (keep.view) map.setView(keep.view.center, keep.view.zoom, { animate: false });
+  } finally {
+    applyingUrl = false;
   }
-  if (keep.view) map.setView(keep.view.center, keep.view.zoom, { animate: false });
 }
 
 /* ---------- live updates ---------- */
@@ -1470,18 +1505,27 @@ const LIVE = !DATA?.static
 const POLL_MS = 15000;
 
 async function pollOnce(state) {
-  const stamp = await (await fetch('stamp.json', { cache: 'no-store' })).json();
+  // Both fetches check res.ok. serve.py returns its error body as perfectly
+  // valid JSON with a 500 status, so without this an error object is ingested
+  // as data: the map is stripped, `current` goes null, the panel keeps showing
+  // the previous car, and pruneOverrides deletes every stored rename.
+  const stampRes = await fetch('stamp.json', { cache: 'no-store' });
+  if (!stampRes.ok) throw new Error(`stamp.json returned ${stampRes.status}`);
+  const stamp = await stampRes.json();
   const key = `${stamp.latest}|${stamp.rows}`;
   if (key === state.key) return;
-  const first = state.key === null;
-  state.key = key;
-  if (first) return;  // the first poll only establishes the baseline
+  if (state.key === null) { state.key = key; return; }  // baseline only
 
   // Carry the page's own window through, so a tab opened with ?days=0 keeps
   // getting everything instead of silently narrowing on the first update.
   const days = new URLSearchParams(location.search).get('days');
   const url = days === null ? 'data.json' : `data.json?days=${encodeURIComponent(days)}`;
-  const payload = await (await fetch(url, { cache: 'no-store' })).json();
+  const res = await fetch(url, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`data.json returned ${res.status}`);
+  const payload = await res.json();
+  if (!Array.isArray(payload?.vehicles) || !payload.vehicles.length) {
+    throw new Error('payload contained no vehicles');
+  }
   // Capture where the user is before pulling the rug out.
   ingest(payload, {
     keep: {
@@ -1495,6 +1539,11 @@ async function pollOnce(state) {
       view: state.userMoved ? { center: map.getCenter(), zoom: map.getZoom() } : null,
     },
   });
+  // Commit the stamp only once the data is actually in. Advancing it before the
+  // fetch meant a failed update was never retried: the next poll saw the same
+  // stamp, returned early, and cleared the stale class -- a green live dot over
+  // data that never loaded, until the car happened to report again.
+  state.key = key;
   flashLive();
 }
 

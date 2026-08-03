@@ -17,6 +17,7 @@ traverse. It holds no credentials and writes nothing.
 
 import json
 import threading
+from collections.abc import Callable
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -59,7 +60,7 @@ def _stamp(cfg: Config) -> dict:
 
 
 class Handler(BaseHTTPRequestHandler):
-    cfg: Config = None  # set by serve()
+    _get_cfg = staticmethod(lambda: None)  # replaced by serve()
     server_version = "bmwcd"
     sys_version = ""
 
@@ -94,7 +95,36 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self.cfg.map_days or None
 
+    @property
+    def cfg(self) -> Config:
+        """The *current* config, resolved per request.
+
+        Not a Config captured when the handler class was built: every settings
+        edit in the menu bar (rename, re-auth, retention) replaces that object,
+        so a captured one went stale the moment anything was changed and the
+        live map kept serving the old vehicle names until the agent restarted.
+        """
+        return type(self)._get_cfg()
+
+    def _host_allowed(self) -> bool:
+        """Only answer to a loopback name.
+
+        Binding to 127.0.0.1 stops off-machine TCP; it does not stop a browser
+        on this machine being pointed here by a hostname that resolves to
+        127.0.0.1 (DNS rebinding). The port is a fixed default and the payload
+        is every fix in the window plus the VINs, so the Host header is the
+        check that actually distinguishes "someone here" from "some page".
+        """
+        host = (self.headers.get("Host") or "").strip()
+        name = host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+        return name.strip("[]") in {"127.0.0.1", "localhost", "::1", ""}
+
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's naming
+        # An Origin at all means a cross-site page made this request; same-origin
+        # navigations and fetches from the map itself do not carry one.
+        if not self._host_allowed() or self.headers.get("Origin"):
+            self._json({"error": "forbidden"}, 403)
+            return
         path = urlparse(self.path).path.rstrip("/") or "/"
         try:
             if path == "/":
@@ -123,9 +153,15 @@ class Handler(BaseHTTPRequestHandler):
     do_HEAD = do_GET
 
 
-def serve(cfg: Config, port: int) -> ThreadingHTTPServer:
-    """Start the server on a background thread and return it."""
-    handler = type("BoundHandler", (Handler,), {"cfg": cfg})
+def serve(cfg: Config | Callable[[], Config], port: int) -> ThreadingHTTPServer:
+    """Start the server on a background thread and return it.
+
+    `cfg` may be a callable returning the current Config. Pass one from any
+    long-lived process: settings edits replace the Config object rather than
+    mutating it, so a handler holding the original serves stale names.
+    """
+    get_cfg = cfg if callable(cfg) else (lambda: cfg)
+    handler = type("BoundHandler", (Handler,), {"_get_cfg": staticmethod(get_cfg)})
     httpd = ThreadingHTTPServer((HOST, port), handler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

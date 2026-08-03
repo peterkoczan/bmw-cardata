@@ -15,6 +15,12 @@ import os
 import shutil
 from pathlib import Path
 
+from .config import ROOT
+
+# The launchd plists and the systemd units both hardcode <repo>/data/logs as
+# their output path, so that is where the logs are regardless of data_dir.
+LOG_DIR = ROOT / "data" / "logs"
+
 
 def _shift(path: Path, keep: int) -> None:
     """stream.log.2 -> stream.log.3, and so on downwards."""
@@ -43,7 +49,11 @@ def rotate(path: Path, max_bytes: int, keep: int = 3) -> bool:
 
 def rotate_all(cfg) -> list[str]:
     """Rotate every launchd log that has grown past the limit."""
-    directory = cfg.data_dir / "logs"
+    # Not cfg.data_dir / "logs": with any relocated data_dir -- a documented,
+    # supported setting -- that directory does not exist, the is_dir() guard
+    # returned [] from both the 30s in-stream check and the nightly prune, and
+    # stream.log grew without bound while everything reported nothing to do.
+    directory = LOG_DIR
     if not directory.is_dir():
         return []
     limit = int(cfg.log_max_mb * 1024 * 1024)
