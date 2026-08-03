@@ -296,7 +296,11 @@ try:
         for key in {k for v in vehicles for k in v["state"]}
         if key in spec
     }
-except Exception:  # noqa: BLE001 - the demo must build without a configured env
+except (Exception, SystemExit):  # noqa: BLE001 - must build without a configured env
+    # SystemExit explicitly: config.load() raises it when there is no
+    # config.toml, which is exactly the state of a fresh clone. A bare
+    # `except Exception` does not catch a BaseException, so the guard that was
+    # meant to make this work on a fresh clone was the thing stopping it.
     pass
 
 data = {

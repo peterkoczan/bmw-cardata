@@ -768,6 +768,10 @@ const stateEl = document.getElementById('state');
 const tiles = new Map();
 
 function buildPanel(v) {
+  // Rebuilt wholesale on every live update, which reset the reader's place in
+  // a long panel every 15 seconds. Restoring afterwards is enough: the content
+  // is the same height unless the car reported a brand new key.
+  const scroll = stateEl.scrollTop;
   stateEl.innerHTML = '';
   tiles.clear();
   if (!v || !v.state || !Object.keys(v.state).length) {
@@ -813,6 +817,7 @@ function buildPanel(v) {
     wrap.appendChild(grid);
     stateEl.appendChild(wrap);
   }
+  stateEl.scrollTop = scroll;
 }
 
 function paintPanel(v, t) {
@@ -1189,6 +1194,11 @@ function beginRename(v) {
 }
 
 function buildSwitcher() {
+  // A live update rebuilds this row every 15 seconds. Doing that mid-rename
+  // detaches the input the user is typing into: blur does not reliably fire on
+  // a removed node, so the typed name was silently lost. The row is unchanged
+  // by an update anyway unless a car appeared, so skipping is safe.
+  if (vehiclesEl.querySelector('input.rename')) return;
   buttons.clear();
   vehiclesEl.replaceChildren();
   for (const v of vehicles) {
@@ -1457,18 +1467,26 @@ function ingest(payload, { keep = null } = {}) {
   // update -- one from selectVehicle's own setFocus, one from the focus restore
   // -- roughly 480 an hour with a filter active, after which Back no longer
   // undoes a filter or leaves the page, and Safari starts rate-limiting.
-  if (keep) applyingUrl = true;
+  // Unconditional, not just on the keep path: the cold render is no more a user
+  // decision than a live update is. Leaving it false there meant the very first
+  // paint pushed an entry, so Back returned to the same page instead of leaving
+  // it. The cold path writes the URL with replaceState at the end regardless.
+  applyingUrl = true;
   try {
     // Suppress the queued fit when a view is about to be restored, or it lands
     // two frames later and overwrites it.
     selectVehicle(current, { fit: !keep?.view });
     if (!keep) {
-      if (fromUrl?.date || fromUrl?.trip != null) {
-        applyingUrl = true;
-        try { setFocus({ date: fromUrl.date, trip: fromUrl.trip }); }
-        finally { applyingUrl = false; }
-      }
-      writeUrl();
+      // Validate against what this car actually has, exactly as the keep path
+      // does. An unreachable ?date= -- a stale bookmark, a hand-edited URL, a
+      // link to a day this car did not drive -- otherwise left the date control
+      // blank and the map empty, with no way back but deleting the parameter.
+      const known = new Set([...dateSel.options].map(o => o.value));
+      const date = fromUrl?.date && known.has(fromUrl.date) ? fromUrl.date : null;
+      const trip = fromUrl?.trip != null && tripById(current, fromUrl.trip)
+        ? fromUrl.trip : null;
+      if (date || trip != null) setFocus({ date, trip });
+      writeUrl();  // replaceState, so an invalid parameter is dropped from the bar
       return;
     }
 
@@ -1548,6 +1566,10 @@ async function pollOnce(state) {
 }
 
 function flashLive() {
+  // Reachable with no vehicle selected -- a payload that arrives while the
+  // switcher is empty still flashes -- and latestOf(current, ...) throws there,
+  // which kills the poll tick and marks the stream stale for no reason.
+  if (!current) return;
   liveDot.classList.remove('pulse');
   void liveDot.offsetWidth;  // restart the animation rather than ignore it
   liveDot.classList.add('pulse');
@@ -1559,13 +1581,18 @@ function flashLive() {
     `New data for ${labelOf(current)}${soc ? `, charge ${soc.value}%` : ''}.`;
 }
 
+// Top level, not inside startLive: the visibility handler at the bottom of this
+// file needs it too, and it must also read false when live polling is off (the
+// demo, a page opened off disk) rather than being undefined.
+let userMovedMap = false;
+
 function startLive() {
-  const state = { key: null, userMoved: false };
+  const state = { key: null, get userMoved() { return userMovedMap; } };
   // Only genuine user gestures pin the view across an update. Listening to
   // Leaflet's move/zoom events instead would fire on our own fitBounds, so the
   // view would count as "user-controlled" from the first render onwards and a
   // drive in progress would never stay framed.
-  const mark = () => { state.userMoved = true; };
+  const mark = () => { userMovedMap = true; };
   map.on('dragend', mark);
   mapEl.addEventListener('wheel', mark, { passive: true });
   mapEl.addEventListener('dblclick', mark);
@@ -1674,7 +1701,13 @@ if (LIVE) startLive();
 // If the first layout happened while hidden, the map measured nothing. Re-fit
 // once it is actually on screen.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') afterLayout(() => fitToVehicle(current));
+  // Only refit if the user has not framed the map themselves. A hidden document
+  // performs no layout, so this exists to fix a map sized while the tab was
+  // hidden -- but unconditionally it also threw away a deliberate pan and zoom
+  // on every single tab return.
+  if (document.visibilityState !== 'visible') return;
+  if (userMovedMap) return;
+  afterLayout(() => fitToVehicle(current));
 });
 </script>
 </body>
