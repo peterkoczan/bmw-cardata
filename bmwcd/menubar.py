@@ -19,7 +19,7 @@ from pathlib import Path
 
 import rumps
 
-from . import auth, config, db
+from . import auth, config, db, logs
 
 LABEL = "nl.koczan.bmw-cardata.stream"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
@@ -117,6 +117,11 @@ def _human_age(seconds: float) -> str:
 # if the process is alive. It refreshes every 30s while connected.
 HEARTBEAT_STALE = 120
 
+# States that are a normal part of the connection lifecycle rather than a fault.
+# The hourly token refresh tears the connection down and rebuilds it inside a
+# few seconds; at a 10s poll that window was reading as an outage.
+TRANSIENT_STATES = {"cycling"}
+
 # How often to repeat "stream down" while it stays down. Once was not enough:
 # the notification that mattered was missed, and nothing said it again for a day.
 DOWN_REMINDER_SECONDS = 3600
@@ -156,11 +161,27 @@ class Status:
         return self.heartbeat_age is not None and self.heartbeat_age < HEARTBEAT_STALE
 
     @property
+    def transient(self) -> bool:
+        """Mid-reconnect rather than down.
+
+        Bounded by the heartbeat age on purpose: a process that died during a
+        cycle would otherwise leave "cycling" in the file and never be reported
+        as down at all.
+        """
+        return (
+            self.stream_state in TRANSIENT_STATES
+            and self.heartbeat_age is not None
+            and self.heartbeat_age < HEARTBEAT_STALE
+        )
+
+    @property
     def glyph(self) -> str:
         if not self.configured or not self.authorised:
             return "⚙️"
         if not self.known:
             return "⚪"
+        if self.stream_pid is not None and self.transient:
+            return "🟡"  # reconnecting; red here flashed once an hour for nothing
         if self.stream_pid is None or not self.connected:
             return "🔴"
         if not self.db_up:
@@ -355,7 +376,7 @@ class App(rumps.App):
         # have made it speak. The stream was dead for 29 hours behind exactly
         # that gap. Now: say it once on discovery, then keep saying it hourly,
         # because a notification missed while away is a notification wasted.
-        if st.authorised and not st.connected:
+        if st.authorised and not st.connected and not st.transient:
             since = getattr(self, "_down_since", None) or time.monotonic()
             self._down_since = since
             last = getattr(self, "_down_notified", None)
@@ -727,7 +748,8 @@ class App(rumps.App):
             return None
         from . import serve
 
-        self._httpd = serve.serve(self.cfg, self.cfg.map_port)
+        # Pass an accessor, not the Config: every edit path replaces self.cfg.
+        self._httpd = serve.serve(lambda: self.cfg, self.cfg.map_port)
         return self._httpd
 
     def open_map(self, _):
@@ -756,8 +778,10 @@ class App(rumps.App):
         webbrowser.open(SETUP_GUIDE_URL)
 
     def open_log(self, _):
-        base = self.cfg.data_dir if self.cfg else config.ROOT / "data"
-        log = base / "logs" / "stream.log"
+        # logs.LOG_DIR, not data_dir: the agents write where their plist says,
+        # which is <repo>/data/logs whatever data_dir is set to. Deriving it
+        # from data_dir made this report "No log yet" for a log that existed.
+        log = logs.LOG_DIR / "stream.log"
         if log.exists():
             _sh("open", "-a", "Console", str(log))
         else:

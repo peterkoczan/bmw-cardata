@@ -8,5 +8,15 @@ config.toml
 tokens.json*
 *.tmp
 data/
-# data_dir is configurable, so telemetry can land outside data/.
+# data_dir is configurable, so telemetry can land outside data/, where the
+# `data/` rule above does not reach. These patterns cover the rest of what the
+# agent writes -- with data_dir = "telemetry", `git add -A` would otherwise
+# stage the rendered map (both VINs and every fix in it), the coordinate log,
+# and the heartbeat.
 *.jsonl
+*.log
+*.err
+viz/map.html
+stream.status
+stream.lock
+catalogue.json
