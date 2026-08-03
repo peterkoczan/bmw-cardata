@@ -126,6 +126,11 @@ TRANSIENT_STATES = {"cycling"}
 # the notification that mattered was missed, and nothing said it again for a day.
 DOWN_REMINDER_SECONDS = 3600
 
+# How long the stream must stay down before the first alert. refresh() runs once
+# directly from __init__, so without a grace period the indicator announced
+# "Stream down" at every login and reboot, before the agent could connect.
+DOWN_GRACE_SECONDS = 60
+
 
 class Status:
     def __init__(self):
@@ -138,8 +143,10 @@ class Status:
         self.stream_detail = ""
         self.heartbeat_age: float | None = None
         self.db_up = False
+        self.db_known = True       # False on a tick that never asked
         self.db_error = ""
         self.last_message: datetime | None = None
+        self.messages = 0          # heartbeat's own counter, for blink detection
         self.rows = 0
         self.keys = 0
 
@@ -232,6 +239,10 @@ def _read_heartbeat(cfg) -> dict:
             "age": time.time() - float(body["at"]),
             "last_message": body.get("last_message"),
             "messages": body.get("messages") or 0,
+            # None means an older stream that does not publish it, which must
+            # read as "unknown" rather than as a healthy database.
+            "degraded": body.get("degraded"),
+            "dropped": body.get("dropped") or 0,
         }
     except (OSError, ValueError, KeyError, TypeError):
         return {"state": "", "detail": "", "age": None, "last_message": None, "messages": 0}
@@ -264,10 +275,15 @@ def poll(cfg, with_counts: bool = True) -> Status:
     # The row counts are the only thing left that needs a query, and they are
     # cosmetic, so they ride the slow cadence. Short timeouts because this runs
     # on the UI thread and an unbounded wait freezes the indicator itself.
+    st.messages = beat["messages"]
     if not with_counts:
-        # Believe the heartbeat about the database too: the stream reports
-        # "connected" only while it is storing what it receives.
-        st.db_up = st.stream_state in {"connected", ""} or st.db_up
+        # The heartbeat carries the sink's own view of storage, so say what it
+        # says. Inferring the database from stream connectivity marked it down
+        # whenever the stream was merely reconnecting -- and with db_error empty
+        # the menu then rendered a dangling "Database: down — ".
+        degraded = beat.get("degraded")
+        st.db_known = degraded is not None
+        st.db_up = not degraded if st.db_known else False
         return st
     try:
         with db.connect(cfg, connect_timeout=3, statement_timeout_ms=4000) as conn:
@@ -336,7 +352,11 @@ class App(rumps.App):
         # been run, and crashing here would crash-loop under KeepAlive.
         try:
             return config.load() if config.exists() else None
-        except Exception:  # noqa: BLE001
+        except (Exception, SystemExit):  # noqa: BLE001
+            # SystemExit explicitly: config.load() raises it for a malformed or
+            # incomplete config, and SystemExit is a BaseException, so a bare
+            # `except Exception` would let it through and crash-loop the agent
+            # under KeepAlive on a file the user could then not get to.
             return None
 
     # ---- display ----------------------------------------------------------
@@ -353,8 +373,13 @@ class App(rumps.App):
 
         # Row/key counts are seq scans; only refresh them every few minutes.
         self._ticks = getattr(self, "_ticks", 0) + 1
-        st = poll(self.cfg, with_counts=self._ticks % 30 == 1)
-        if not st.db_up or st.rows:
+        with_counts = self._ticks % 30 == 1
+        st = poll(self.cfg, with_counts=with_counts)
+        # Only write the cache on a tick that actually queried. The old test
+        # wrote (0, 0) whenever a fast tick reported db_up False -- which is
+        # precisely the tick that queried nothing and was meant to *use* the
+        # cache, so the menu showed "Rows: 0" for up to five minutes.
+        if with_counts:
             self._last_counts = (st.rows, st.keys)
         else:
             st.rows, st.keys = getattr(self, "_last_counts", (0, 0))
@@ -364,10 +389,15 @@ class App(rumps.App):
         # Blink when the car says something. The glyph otherwise sits green for
         # hours whether the stream is delivering or merely connected, and those
         # look identical until you go and read the log.
-        seen = getattr(self, "_last_seen_message", None)
-        if seen is not None and st.last_message is not None and st.last_message > seen:
+        # Off the heartbeat's own counter, which is one monotonic source.
+        # Comparing st.last_message across ticks compared two different clocks
+        # -- the stream's local wall clock on a fast tick, BMW's telemetry
+        # timestamp on a counted one -- so the value flipped between them and
+        # produced a phantom blink roughly every five minutes.
+        seen = getattr(self, "_last_seen_count", None)
+        if seen is not None and st.messages > seen:
             self._blink()
-        self._last_seen_message = st.last_message
+        self._last_seen_count = st.messages
 
         # Tell the user it is broken, not merely that it broke. This only fired
         # on a transition observed by *this* process, so an indicator that
@@ -379,11 +409,13 @@ class App(rumps.App):
         if st.authorised and not st.connected and not st.transient:
             since = getattr(self, "_down_since", None) or time.monotonic()
             self._down_since = since
+            down_for = time.monotonic() - since
             last = getattr(self, "_down_notified", None)
-            if last is None or time.monotonic() - last >= DOWN_REMINDER_SECONDS:
+            due = last is None or time.monotonic() - last >= DOWN_REMINDER_SECONDS
+            if down_for >= DOWN_GRACE_SECONDS and due:
                 self._down_notified = time.monotonic()
-                down_for = _human_age(time.monotonic() - since) if last else "just now"
-                self._note("Stream down", f"{st.stream_summary} ({down_for})")
+                age = _human_age(down_for) if last else "just now"
+                self._note("Stream down", f"{st.stream_summary} ({age})")
         else:
             self._down_since = None
             self._down_notified = None
@@ -392,7 +424,9 @@ class App(rumps.App):
 
         self.item_db.title = (
             "Database: up" if st.db_up
-            else f"Database: down — {st.db_error}" if st.configured
+            else "Database: …" if not st.db_known
+            else f"Database: down — {st.db_error}" if st.configured and st.db_error
+            else "Database: down" if st.configured
             else "Database: —"
         )
         silent = st.silent_for

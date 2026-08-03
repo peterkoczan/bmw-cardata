@@ -57,8 +57,15 @@ def load() -> Config:
         raise SystemExit(
             f"No {CONFIG_PATH}. Copy config.example.toml to config.toml and fill it in."
         )
-    with CONFIG_PATH.open("rb") as fh:
-        return Config(tomllib.load(fh))
+    try:
+        with CONFIG_PATH.open("rb") as fh:
+            return Config(tomllib.load(fh))
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"{CONFIG_PATH} is not valid TOML: {exc}") from exc
+    except KeyError as exc:
+        raise SystemExit(f"{CONFIG_PATH} is missing required setting {exc}") from exc
+    except (TypeError, ValueError) as exc:
+        raise SystemExit(f"{CONFIG_PATH} has an unusable value: {exc}") from exc
 
 
 def ensure() -> Path:
@@ -76,25 +83,45 @@ def set_value(key: str, value) -> None:
     them. Only simple top-level scalars are supported, which is all the GUI sets.
     """
     ensure()
-    rendered = f'"{value}"' if isinstance(value, str) else str(value)
+    # Escaped, like set_name does. A dsn with a password containing a quote or a
+    # backslash -- postgresql://u:pa"ss@host -- otherwise wrote a line that made
+    # the entire config unparseable, and the next load failed on a file the user
+    # never edited by hand.
+    rendered = f'"{_toml_escape(value)}"' if isinstance(value, str) else str(value)
     lines = CONFIG_PATH.read_text().splitlines()
-    out, replaced = [], False
-    for line in lines:
+
+    def key_of(line: str) -> str:
         stripped = line.lstrip()
-        # Also match a commented-out default so setting it uncomments the line.
+        # Also match a commented-out default, so setting it uncomments the line.
         bare = stripped[1:].lstrip() if stripped.startswith("#") else stripped
-        if not replaced and bare.split("=")[0].strip() == key:
+        return bare.split("=")[0].strip()
+
+    # A live assignment wins over a commented default. Taking whichever came
+    # first meant that with a `# map_port = 8770` hint above a real `map_port =
+    # 9000`, setting it uncommented the hint and left the real line in place --
+    # two assignments of the same key, which TOML rejects outright.
+    target = next(
+        (i for i, line in enumerate(lines)
+         if key_of(line) == key and not line.lstrip().startswith("#")),
+        None,
+    )
+    if target is None:
+        target = next((i for i, line in enumerate(lines) if key_of(line) == key), None)
+
+    if target is not None:
+        lines[target] = f"{key} = {rendered}"
+        CONFIG_PATH.write_text("\n".join(lines) + "\n")
+        return
+
+    # Absent entirely: insert before the first table header, since a top-level
+    # scalar below one would be read as a member of that table.
+    out, placed = [], False
+    for line in lines:
+        if not placed and line.lstrip().startswith("["):
             out.append(f"{key} = {rendered}")
-            replaced = True
-        # A top-level scalar must not land under a table header, where TOML
-        # would read it as a member of that table instead.
-        elif stripped.startswith("[") and not replaced:
-            out.append(f"{key} = {rendered}")
-            out.append(line)
-            replaced = True
-        else:
-            out.append(line)
-    if not replaced:
+            placed = True
+        out.append(line)
+    if not placed:
         out.append(f"{key} = {rendered}")
     CONFIG_PATH.write_text("\n".join(out) + "\n")
 
