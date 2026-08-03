@@ -7,6 +7,8 @@ in Postgres, and draws a map I can scrub back through.
 It runs on my laptop as a background service with a menu bar icon that tells me
 whether it's actually working.
 
+Feel free to use it, adjust it and raise any issues in the issue tracker on github or submit PRs if you made improvements. Free to take and adjust, but I would greatly appreciate if you'd submit any betterment as a PR.
+
 ![Map preview](docs/screenshot.png)
 
 [Live demo](https://peterkoczan.github.io/bmw-cardata/demo.html) — made-up data,
