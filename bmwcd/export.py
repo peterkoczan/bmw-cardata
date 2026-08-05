@@ -87,6 +87,12 @@ ELECTRIC_UNMEASURED_INTENSITY = 0.22
 # recuperation.
 CHARGE_STALE_AFTER = timedelta(minutes=15)
 
+# How many *distinct* combustion-only keys a car must have reported with a real
+# value before we call it a fuel burner. Two, not one: BMW occasionally emits a
+# single key that belongs to a drivetrain the car does not have, and one stray
+# sample should not redefine the vehicle. See _burns_fuel.
+MIN_COMBUSTION_KEYS = 2
+
 # Derived speed is only close to the truth while the car cannot have gone far
 # off the straight line between two fixes. Past this the figure is still a valid
 # floor, but a weak one, so it is labelled rough rather than quoted plainly.
@@ -333,16 +339,25 @@ def _burns_fuel(conn, vin: str, combustion_only: set[str]) -> bool:
     Non-numeric keys count on presence, since there is no zero to compare to.
     This is derived per car from its own data, so a model nobody here has seen
     classifies itself the first time it streams.
+
+    The value test alone is not enough, though: on 2026-08-05 the i3 reported a
+    single `internalCombustionEngine.engine.ect` of 118 -- a coolant temperature
+    for an engine it does not have. Non-zero, so the value test passed, and one
+    stray sample reclassified a battery car as a hybrid. So require
+    corroboration: a car that genuinely burns fuel reports a *family* of these
+    keys, repeatedly, because fuel level, range and service distance all stream
+    together. The X5 has six distinct ones with hundreds of samples; the i3 had
+    one, once. Isolated keys are how BMW's phantoms arrive.
     """
     if not combustion_only:
         return True  # no catalogue: assume an engine rather than hide fuel
     row = conn.execute(
-        "SELECT count(*) FROM telemetry"
+        "SELECT count(DISTINCT key) FROM telemetry"
         " WHERE vin=%s AND key = ANY(%s)"
         "   AND (num > 0 OR (num IS NULL AND (bool IS NOT NULL OR txt IS NOT NULL)))",
         (vin, list(combustion_only)),
     ).fetchone()
-    return bool(row and row[0])
+    return bool(row and row[0] >= MIN_COMBUSTION_KEYS)
 
 
 def _state_series(conn, vin: str, since) -> dict:

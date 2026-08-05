@@ -1278,6 +1278,18 @@ function option(value, text) {
   return o;
 }
 
+// The two days anyone actually looks for, named rather than counted out. Built
+// through the same fmtDate that produced the option values, so the comparison
+// is like-for-like: comparing against an ISO slice of a UTC date would label the
+// wrong row for anyone east or west of UTC for part of the day.
+function relativeDay(day) {
+  const today = new Date();
+  if (day === fmtDate(today)) return 'today';
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  return day === fmtDate(yesterday) ? 'yesterday' : null;
+}
+
 function buildDatePicker(v) {
   const days = daysFor(v);
   dateSel.replaceChildren(option('', `All dates (${days.length})`));
@@ -1286,7 +1298,11 @@ function buildDatePicker(v) {
     if (e.trips.size) bits.push(`${e.trips.size} trip${e.trips.size > 1 ? 's' : ''}`);
     if (e.fixes) bits.push(`${e.fixes} fix${e.fixes === 1 ? '' : 'es'}`);
     if (!bits.length) bits.push('state only');
-    dateSel.appendChild(option(day, `${day} — ${bits.join(', ')}`));
+    // Rebuilt on every live update, so this re-evaluates rather than freezing
+    // "today" at whatever it was when a long-open tab was first loaded.
+    const rel = relativeDay(day);
+    const label = rel ? `${day} (${rel})` : day;
+    dateSel.appendChild(option(day, `${label} — ${bits.join(', ')}`));
   }
   dateSel.value = focus.date || '';
   dateSel.disabled = !days.length;
