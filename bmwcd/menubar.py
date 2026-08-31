@@ -117,6 +117,14 @@ def _human_age(seconds: float) -> str:
 # if the process is alive. It refreshes every 30s while connected.
 HEARTBEAT_STALE = 120
 
+# BMW's refresh token dies after roughly a fortnight of NOT being used. It
+# rotates on every refresh, so an agent that runs keeps it alive indefinitely --
+# what kills it is a laptop left shut. BMW sends no expiry for it, so the age of
+# the last successful refresh (tokens.json's mtime) is the only signal we have.
+REFRESH_TOKEN_LIFETIME_DAYS = 14
+# Warn while there is still time to do anything about it.
+CREDENTIAL_WARN_AFTER_DAYS = 11
+
 # States that are a normal part of the connection lifecycle rather than a fault.
 # The hourly token refresh tears the connection down and rebuilds it inside a
 # few seconds; at a 10s poll that window was reading as an outage.
@@ -140,6 +148,8 @@ class Status:
         self.stream_pid: int | None = None
         self.loaded = False
         self.stream_state = ""     # from the heartbeat file
+        self.auth_expired = False  # credentials present but rejected by BMW
+        self.credential_age: float | None = None  # seconds since last good refresh
         self.stream_detail = ""
         self.heartbeat_age: float | None = None
         self.db_up = False
@@ -183,7 +193,7 @@ class Status:
 
     @property
     def glyph(self) -> str:
-        if not self.configured or not self.authorised:
+        if not self.configured or not self.authorised or self.auth_expired:
             return "⚙️"
         if not self.known:
             return "⚪"
@@ -212,6 +222,8 @@ class Status:
             return "Not set up — use “Set up / re-authorise…”"
         if not self.authorised:
             return "Not authorised — use “Set up / re-authorise…”"
+        if self.auth_expired:
+            return "Authorisation EXPIRED — use “Set up / re-authorise…”"
         if not self.known:
             return "Stream: unknown (launchctl unavailable)"
         if self.stream_pid is None:
@@ -251,7 +263,16 @@ def _read_heartbeat(cfg) -> dict:
 def poll(cfg, with_counts: bool = True) -> Status:
     st = Status()
     st.configured = cfg is not None
+    # Not merely TOKEN_PATH.exists(): an expired refresh token leaves the file
+    # exactly where it was, so treating presence as authorisation reported this
+    # as fine for 23 days while BMW rejected every refresh -- and made the
+    # "Not authorised" message unreachable in the one case it was written for.
     st.authorised = config.TOKEN_PATH.exists()
+    if st.authorised:
+        try:
+            st.credential_age = time.time() - config.TOKEN_PATH.stat().st_mtime
+        except OSError:
+            st.credential_age = None
 
     jobs = _launchctl_jobs()
     st.known = jobs is not None
@@ -264,6 +285,7 @@ def poll(cfg, with_counts: bool = True) -> Status:
         return st
     beat = _read_heartbeat(cfg)
     st.stream_state = beat["state"]
+    st.auth_expired = beat["state"] == "needs_auth"
     st.stream_detail = beat["detail"]
     st.heartbeat_age = beat["age"]
     # From the file, not the database. The stream stamps this the moment it
@@ -311,12 +333,14 @@ class App(rumps.App):
         self.item_stream = rumps.MenuItem("Stream: …")
         self.item_db = rumps.MenuItem("Database: …")
         self.item_last = rumps.MenuItem("Last message: …")
+        self.item_auth = rumps.MenuItem("Authorisation: …")
         self.item_rows = rumps.MenuItem("Rows: …")
         self.item_retention = rumps.MenuItem("Retention…", callback=self.set_retention)
         self.item_rename = rumps.MenuItem("Rename vehicle")
         self._vins: list[str] = []
         self.menu = [
             self.item_stream,
+            self.item_auth,
             self.item_db,
             self.item_last,
             self.item_rows,
@@ -406,7 +430,23 @@ class App(rumps.App):
         # have made it speak. The stream was dead for 29 hours behind exactly
         # that gap. Now: say it once on discovery, then keep saying it hourly,
         # because a notification missed while away is a notification wasted.
-        if st.authorised and not st.connected and not st.transient:
+        # An expired credential is its own alert. It is not a fault to wait out
+        # -- nothing will fix it but a person -- so it says what happened and
+        # what to do, rather than "Stream down" plus BMW's raw JSON, and it
+        # skips the down-grace because the diagnosis is already definitive.
+        if st.auth_expired:
+            self._down_since = None
+            last = getattr(self, "_auth_notified", None)
+            if last is None or time.monotonic() - last >= DOWN_REMINDER_SECONDS:
+                self._auth_notified = time.monotonic()
+                self._note(
+                    "BMW authorisation expired",
+                    "The stream is stopped and no data is being recorded. "
+                    "Open the menu bar icon and choose “Set up / re-authorise…” "
+                    "— it takes about 30 seconds.",
+                )
+        elif st.authorised and not st.connected and not st.transient:
+            self._auth_notified = None
             since = getattr(self, "_down_since", None) or time.monotonic()
             self._down_since = since
             down_for = time.monotonic() - since
@@ -419,8 +459,28 @@ class App(rumps.App):
         else:
             self._down_since = None
             self._down_notified = None
+            self._auth_notified = None
+
+        # Warn while it can still be acted on. The credential only dies from
+        # disuse, so the danger window is a laptop about to be shut for a while
+        # -- which is exactly when nothing else will be watching.
+        self._warn_credential_ageing(st)
 
         self.item_stream.title = st.stream_summary
+        if not st.authorised:
+            auth_line = "Authorisation: none yet"
+        elif st.auth_expired:
+            auth_line = "Authorisation: EXPIRED — re-authorise"
+        elif st.credential_age is None:
+            auth_line = "Authorisation: ok"
+        else:
+            days = st.credential_age / 86400
+            left = REFRESH_TOKEN_LIFETIME_DAYS - days
+            auth_line = (
+                f"Authorisation: renewed {_human_age(st.credential_age)}"
+                + (f" (~{left:.0f}d left unused)" if days >= 1 else "")
+            )
+        self.item_auth.title = auth_line
 
         self.item_db.title = (
             "Database: up" if st.db_up
@@ -586,6 +646,34 @@ class App(rumps.App):
         self._blinks_left = left - 1
         # Odd counts are the lit half of the cycle.
         self._set_icon("flash" if left % 2 == 0 else getattr(self, "_resting_colour", "green"))
+
+    def _warn_credential_ageing(self, st) -> None:
+        """Say something before the credential dies, not only after.
+
+        Narrow by nature: a running, connected agent refreshes hourly and each
+        refresh resets this clock, so the warning can only fire when nothing has
+        refreshed for most of a fortnight -- a stopped stream, or a machine
+        asleep since before the window. That is exactly the situation nobody is
+        watching, which is why it is worth a notification rather than only a
+        menu line. Once a day; more would be nagging.
+        """
+        if st.auth_expired or st.credential_age is None:
+            return
+        days = st.credential_age / 86400
+        if days < CREDENTIAL_WARN_AFTER_DAYS:
+            return
+        last = getattr(self, "_cred_warned", None)
+        if last is not None and time.monotonic() - last < 86400:
+            return
+        self._cred_warned = time.monotonic()
+        left = max(0.0, REFRESH_TOKEN_LIFETIME_DAYS - days)
+        self._note(
+            "BMW authorisation expiring",
+            f"Last renewed {days:.0f} days ago. It lapses after about "
+            f"{REFRESH_TOKEN_LIFETIME_DAYS} days without use — roughly "
+            f"{left:.0f} left. Leave the stream running for a minute to renew "
+            "it, or re-authorise now.",
+        )
 
     def _note(self, title: str, message: str = ""):
         try:

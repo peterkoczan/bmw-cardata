@@ -323,6 +323,12 @@ def _attribute_trips(points, trips, s):
     return by_trip
 
 
+def _latest_any(conn) -> str | None:
+    """Newest telemetry timestamp in the whole database, ignoring any window."""
+    row = conn.execute("SELECT max(ts) FROM telemetry").fetchone()
+    return row[0].isoformat() if row and row[0] else None
+
+
 def _burns_fuel(conn, vin: str, combustion_only: set[str]) -> bool:
     """Does this car have an engine, according to what it has actually sent?
 
@@ -440,6 +446,9 @@ def build(cfg: Config, days: int | None = None) -> dict:
     combustion_only = cat.combustion_only_keys(spec)
 
     with db.connect(cfg) as conn:
+        # Read inside the connection scope: the payload is assembled after the
+        # `with` block has closed it.
+        latest_any = _latest_any(conn)
         vins = [
             r[0]
             for r in conn.execute(
@@ -622,6 +631,12 @@ def build(cfg: Config, days: int | None = None) -> dict:
         # How much history this payload covers, so the page can say so rather
         # than let a window pass for the whole record.
         "window_days": days,
+        # The newest reading in the database *regardless* of the window. Without
+        # it a window that happens to contain nothing renders as an empty map
+        # indistinguishable from "you have never recorded anything" -- which is
+        # exactly what a stopped stream plus a 7-day window produces, while
+        # weeks of perfectly good data sit just outside it.
+        "latest_any": latest_any,
         "vehicles": vehicles,
         "labels": labels,
         "categories": list(CATEGORY_LABELS.values()),
