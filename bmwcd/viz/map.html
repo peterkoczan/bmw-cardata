@@ -775,7 +775,13 @@ function buildPanel(v) {
   stateEl.innerHTML = '';
   tiles.clear();
   if (!v || !v.state || !Object.keys(v.state).length) {
-    stateEl.innerHTML = '<div class="note">No telemetry recorded for this vehicle yet.</div>';
+    stateEl.replaceChildren(Object.assign(document.createElement('div'), {
+      className: 'note',
+      textContent: windowIsEmptyButDataExists()
+        ? `No readings in the last ${DATA.window_days} days for this vehicle. `
+          + `Older data exists — append ?days=0 to the URL to see it.`
+        : 'No telemetry recorded for this vehicle yet.',
+    }));
     return;
   }
   const priority = priorityFor(v);
@@ -1065,12 +1071,28 @@ function selectVehicle(v, { fit = true } = {}) {
   setFocus({}, { fit });
 }
 
+// True when the window came back empty but the database is not. This is what a
+// stopped stream looks like a week later, and it used to render as a blank map
+// that was indistinguishable from having never recorded anything at all.
+function windowIsEmptyButDataExists() {
+  const inWindow = vehicles.some(v => (v.points || []).length || Object.keys(v.state || {}).length);
+  return !inWindow && !!DATA?.latest_any;
+}
+
 function showNotes(v) {
   const parts = [...(v?.notes || []), ...(DATA?.notes || [])];
   // A window must not pass for the whole record. Only says so when it is
   // actually a window -- ?days=0 sends everything and gets no note.
   if (LIVE && DATA?.window_days) {
     parts.unshift(`showing the last ${DATA.window_days} days — ?days=0 for everything`);
+  }
+  if (windowIsEmptyButDataExists()) {
+    const age = Math.round((Date.now() - new Date(DATA.latest_any)) / 86400000);
+    parts.unshift(
+      `Nothing in the last ${DATA.window_days} days. The newest reading is ` +
+      `${fmtDateTime(new Date(DATA.latest_any))} (${age} days ago) — the stream ` +
+      `has not recorded since. Use ?days=0 to see it.`
+    );
   }
   if (!vehicles.length) parts.unshift('No telemetry recorded yet.');
   const renamed = v && overrideFor(v);
